@@ -1,0 +1,1000 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>ครัวคุณยาย — สั่งอาหารผ่าน QR | ARIN</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@300;400;500;600;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          navy: { 900: '#0A1830', 800: '#0F2038', 700: '#16304F', 600: '#1E3E63' },
+          flamingo: { 500: '#FF5C8D', 400: '#FF7FA3', 300: '#FFA8C1', 100: '#FFE3EC' },
+          paper: '#F7F8FA',
+          ink: '#1A2233',
+          slate: { 500: '#6B7686', 400: '#8B94A3' },
+        },
+        fontFamily: {
+          display: ['"IBM Plex Sans Thai"', '"Inter"', 'sans-serif'],
+          body: ['"IBM Plex Sans Thai"', '"Inter"', 'sans-serif'],
+        },
+        boxShadow: {
+          card: '0 2px 14px rgba(10,24,48,0.06)',
+          float: '0 8px 30px rgba(10,24,48,0.18)',
+        },
+      },
+    },
+  };
+</script>
+<style>
+  * { font-family: 'IBM Plex Sans Thai', 'Inter', sans-serif; }
+  body { background: #F7F8FA; }
+  ::selection { background: #FF5C8D; color: white; }
+  .pulse-dot { animation: pulse-dot 1.6s ease-in-out infinite; }
+  @keyframes pulse-dot {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(255,92,141,0.55); }
+    50% { box-shadow: 0 0 0 8px rgba(255,92,141,0); }
+  }
+  .drawer-enter { transform: translateY(100%); }
+  .drawer-open { transform: translateY(0%); transition: transform .32s cubic-bezier(.32,.72,0,1); }
+  .drawer-close { transition: transform .28s cubic-bezier(.4,0,1,1); }
+  .fade-in { animation: fadeIn .25s ease-out; }
+  @keyframes fadeIn { from { opacity:0; transform: translateY(6px);} to { opacity:1; transform:none; } }
+  .scrollbar-thin::-webkit-scrollbar { height: 4px; width: 4px; }
+  .scrollbar-thin::-webkit-scrollbar-thumb { background: #E2E5EA; border-radius: 4px; }
+  img.menu-img { background: linear-gradient(135deg,#EDEFF3,#F7F8FA); }
+</style>
+</head>
+<body class="text-ink antialiased">
+
+<!-- OFFLINE BANNER (E4) -->
+<div id="offline-banner" class="hidden fixed top-0 inset-x-0 z-50 bg-navy-900 text-white text-sm text-center py-2 font-medium">
+  📶 ไม่มีสัญญาณอินเทอร์เน็ต — กำลังรอเชื่อมต่อใหม่...
+</div>
+
+<div id="app" class="max-w-md mx-auto min-h-screen bg-paper relative pb-28"></div>
+
+<script>
+/**
+ * ARIN QR ORDERING SYSTEM — CORE DATA / API LAYER (v2)
+ * =====================================================
+ * Doc refs: ARIN-API-QR-001 v1.0, ARIN-DB-QR-001 v1.0, ARIN-EDGE-QR-001 v1.0, ARIN-AC-QR-001 v1.0
+ * + new scope (not in v1.0 docs — tracked here until formal spec docs exist):
+ *     - merchant_users.role ('owner' | 'staff')
+ *     - restaurant/menu/table self-service management (owner only)
+ *     - QR code linking helper
+ *     - platform-level Super Admin actor (separate from merchant_users entirely)
+ *       with cross-restaurant sales analytics
+ *
+ * This file is a LOCAL, WORKING STAND-IN for the real backend. Every function
+ * returns the same { success, data } / { success, error } envelope as the API
+ * spec so UI code never branches on "mock vs real". See bottom of file for the
+ * "PRODUCTION: ..." comments marking exactly what a real backend call replaces.
+ */
+
+(function (global) {
+  'use strict';
+
+  // ---------------------------------------------------------------------
+  // 1. STORAGE KEYS (maps to ARIN-DB-QR-001 table names, plus new ones)
+  // ---------------------------------------------------------------------
+  const KEYS = {
+    schemaVersion: 'arin_qr_schema_version',
+    restaurants: 'arin_qr_restaurants',
+    tables: 'arin_qr_tables',
+    menuItems: 'arin_qr_menu_items',
+    merchantUsers: 'arin_qr_merchant_users',
+    orders: 'arin_qr_orders',
+    orderItems: 'arin_qr_order_items',
+    session: 'arin_qr_merchant_session',   // merchant (owner/staff) session
+    adminUsers: 'arin_qr_admin_users',     // NEW: platform-level actor, not tied to any restaurant
+    adminSession: 'arin_qr_admin_session', // NEW
+  };
+  const SCHEMA_VERSION = '2';
+
+  function read(key, fallback) {
+    try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : fallback; }
+    catch (e) { return fallback; }
+  }
+  function write(key, value) { localStorage.setItem(key, JSON.stringify(value)); }
+  function uid(prefix) { return (prefix ? prefix + '_' : '') + Math.random().toString(36).slice(2, 10); }
+  function nowIso() { return new Date().toISOString(); } // always UTC (E26) — format locally on display only
+  function envelopeOk(data) { return { success: true, data, meta: { timestamp: nowIso() } }; }
+  function envelopeErr(code, message) { return { success: false, error: { code, message }, meta: { timestamp: nowIso() } }; }
+
+  // ---------------------------------------------------------------------
+  // 2. SEED DATA
+  //    NOTE: this is a demo/prototype data layer. Bumping SCHEMA_VERSION
+  //    wipes and reseeds fresh rather than writing a real migration — fine
+  //    for a local prototype, NOT the pattern to use once there's real
+  //    restaurant data in a real database.
+  // ---------------------------------------------------------------------
+  function clearAll() { Object.values(KEYS).forEach((k) => { if (k !== KEYS.schemaVersion) localStorage.removeItem(k); }); }
+
+  function seedMenuFor(restaurantId, defs) {
+    return defs.map((m) => ({ id: uid('menu'), restaurant_id: restaurantId, image_url: '', created_at: nowIso(), updated_at: nowIso(), ...m }));
+  }
+
+  function seed() {
+    if (read(KEYS.schemaVersion, null) === SCHEMA_VERSION) return; // already on current schema
+    clearAll();
+
+    // ---- Restaurant 1 ----
+    const r1 = 'rest_001';
+    // ---- Restaurant 2 (so Super Admin has more than one restaurant to compare) ----
+    const r2 = 'rest_002';
+
+    write(KEYS.restaurants, [
+      { id: r1, name: 'ครัวคุณยาย', phone: '043-000-000', logo_url: '', is_active: true, created_at: nowIso(), updated_at: nowIso() },
+      { id: r2, name: 'ก๋วยเตี๋ยวเรือลุงมานี', phone: '043-111-111', logo_url: '', is_active: true, created_at: nowIso(), updated_at: nowIso() },
+    ]);
+
+    const tables1 = Array.from({ length: 8 }, (_, i) => ({ id: uid('table'), restaurant_id: r1, table_number: String(i + 1).padStart(2, '0'), qr_code_url: '', created_at: nowIso() }));
+    const tables2 = Array.from({ length: 6 }, (_, i) => ({ id: uid('table'), restaurant_id: r2, table_number: String(i + 1).padStart(2, '0'), qr_code_url: '', created_at: nowIso() }));
+    write(KEYS.tables, [...tables1, ...tables2]);
+
+    const menu1 = seedMenuFor(r1, [
+      { name: 'ผัดไทยกุ้งสด', description: 'เส้นจันท์ผัดซอสมะขาม กุ้งแม่น้ำตัวโต', price: 89, category: 'จานหลัก', available: true },
+      { name: 'ข้าวผัดกุ้ง', description: 'ข้าวหอมมะลิผัดกุ้งสด ไข่ดาวเยิ้ม', price: 79, category: 'จานหลัก', available: true },
+      { name: 'ต้มยำกุ้งน้ำข้น', description: 'รสจัดจ้าน เครื่องแน่น', price: 129, category: 'จานหลัก', available: true },
+      { name: 'ส้มตำไทย', description: 'เผ็ดกลาง หวานนำ', price: 59, category: 'ของทานเล่น', available: true },
+      { name: 'ปีกไก่ทอดน้ำปลา', description: 'ทอดกรอบ หมักน้ำปลาโบราณ', price: 69, category: 'ของทานเล่น', available: false },
+      { name: 'ชาไทยเย็น', description: 'ชงเข้ม หวานมัน', price: 39, category: 'เครื่องดื่ม', available: true },
+      { name: 'น้ำมะนาวโซดา', description: 'สดชื่น เปรี้ยวซ่า', price: 35, category: 'เครื่องดื่ม', available: true },
+    ]);
+    const menu2 = seedMenuFor(r2, [
+      { name: 'ก๋วยเตี๋ยวเรือหมู', description: 'น้ำตกเข้มข้น เส้นเล็ก', price: 45, category: 'จานหลัก', available: true },
+      { name: 'ก๋วยเตี๋ยวเรือเนื้อ', description: 'น้ำตกเข้มข้น เส้นใหญ่', price: 49, category: 'จานหลัก', available: true },
+      { name: 'ลูกชิ้นปลาทอด', description: 'ทอดกรอบ จิ้มซีฟู้ด', price: 39, category: 'ของทานเล่น', available: true },
+      { name: 'น้ำอัดลม', description: 'เย็นฉ่ำ', price: 20, category: 'เครื่องดื่ม', available: true },
+    ]);
+    write(KEYS.menuItems, [...menu1, ...menu2]);
+
+    write(KEYS.merchantUsers, [
+      { id: uid('merchant'), restaurant_id: r1, email: 'demo@arin.co', password: 'demo1234', role: 'owner', is_locked: false, created_at: nowIso(), last_login_at: null },
+      { id: uid('merchant'), restaurant_id: r1, email: 'staff@arin.co', password: 'staff1234', role: 'staff', is_locked: false, created_at: nowIso(), last_login_at: null },
+      { id: uid('merchant'), restaurant_id: r2, email: 'manee@arin.co', password: 'manee1234', role: 'owner', is_locked: false, created_at: nowIso(), last_login_at: null },
+    ]);
+
+    // Super Admin — platform-level, NOT scoped to any restaurant, completely separate login.
+    write(KEYS.adminUsers, [
+      { id: uid('admin'), email: 'admin@arin.co', password: 'arinadmin2026', name: 'ARIN Admin', created_at: nowIso() },
+    ]);
+
+    write(KEYS.orders, []);
+    write(KEYS.orderItems, []);
+
+    seedHistoricalOrders(r1, tables1, menu1, 60);
+    seedHistoricalOrders(r2, tables2, menu2, 60);
+
+    write(KEYS.schemaVersion, SCHEMA_VERSION);
+  }
+
+  // Backfills realistic-looking completed orders over the past N days so
+  // Super Admin charts (day/week/month/year) have something to show
+  // immediately instead of an empty graph on first load.
+  function seedHistoricalOrders(restaurantId, tables, menuItems, days) {
+    const orders = read(KEYS.orders, []);
+    const orderItems = read(KEYS.orderItems, []);
+    const availableMenu = menuItems.filter((m) => m.available !== false || true); // include all for variety
+    const today = new Date();
+
+    for (let d = days; d >= 0; d--) {
+      const day = new Date(today); day.setDate(today.getDate() - d);
+      const isWeekend = [0, 6].includes(day.getDay());
+      const isToday = d === 0;
+      const currentHour = today.getHours();
+      if (isToday && currentHour < 10) continue; // restaurant not "open" yet today — skip rather than fake future orders
+      const ordersToday = Math.floor((isWeekend ? 10 : 6) + Math.random() * (isWeekend ? 10 : 8)) * (isToday ? 0.5 : 1);
+      for (let n = 0; n < ordersToday; n++) {
+        const table = tables[Math.floor(Math.random() * tables.length)];
+        const itemCount = 1 + Math.floor(Math.random() * 3);
+        const pickedIds = new Set();
+        let total = 0;
+        const items = [];
+        for (let k = 0; k < itemCount; k++) {
+          const m = availableMenu[Math.floor(Math.random() * availableMenu.length)];
+          if (pickedIds.has(m.id)) continue;
+          pickedIds.add(m.id);
+          const qty = 1 + Math.floor(Math.random() * 3);
+          total += m.price * qty;
+          items.push({ id: uid('oi'), menu_item_id: m.id, menu_item_name: m.name, unit_price: m.price, quantity: qty, note: '' });
+        }
+        if (items.length === 0) continue;
+        const hour = isToday ? 10 + Math.floor(Math.random() * Math.max(1, currentHour - 10)) : 10 + Math.floor(Math.random() * 11); // 10:00–21:00 service window
+        const createdAt = new Date(day); createdAt.setHours(hour, Math.floor(Math.random() * 60), 0, 0);
+        const order = {
+          id: uid('ord'), restaurant_id: restaurantId, table_id: table.id, status: 'completed',
+          total, idempotency_key: uid('idem'), created_at: createdAt.toISOString(), updated_at: createdAt.toISOString(),
+        };
+        orders.push(order);
+        items.forEach((it) => orderItems.push({ ...it, order_id: order.id }));
+      }
+    }
+    write(KEYS.orders, orders);
+    write(KEYS.orderItems, orderItems);
+  }
+
+  // ---------------------------------------------------------------------
+  // 3. REALTIME LAYER — BroadcastChannel stands in for Supabase Realtime /
+  //    the WSS endpoints in API spec §6. See README for production notes.
+  // ---------------------------------------------------------------------
+  const bc = ('BroadcastChannel' in window) ? new BroadcastChannel('arin-qr-system') : null;
+  const listeners = { merchant: {}, order: {} };
+  if (bc) {
+    bc.onmessage = (ev) => {
+      const { event, restaurant_id, order_id, data } = ev.data || {};
+      if (event === 'order.created' || event === 'order.updated') {
+        (listeners.merchant[restaurant_id] || []).forEach((cb) => cb({ event, data }));
+        (listeners.order[order_id] || []).forEach((cb) => cb({ event, data }));
+      }
+    };
+  }
+  const ARIN_REALTIME = {
+    subscribeMerchant(restaurantId, cb) {
+      listeners.merchant[restaurantId] = listeners.merchant[restaurantId] || [];
+      listeners.merchant[restaurantId].push(cb);
+      return () => { listeners.merchant[restaurantId] = (listeners.merchant[restaurantId] || []).filter((f) => f !== cb); };
+    },
+    subscribeOrder(orderId, cb) {
+      listeners.order[orderId] = listeners.order[orderId] || [];
+      listeners.order[orderId].push(cb);
+      return () => { listeners.order[orderId] = (listeners.order[orderId] || []).filter((f) => f !== cb); };
+    },
+    _emit(event, payload) {
+      if (bc) bc.postMessage({ event, ...payload });
+      if (payload.restaurant_id) (listeners.merchant[payload.restaurant_id] || []).forEach((cb) => cb({ event, data: payload.data }));
+      if (payload.order_id) (listeners.order[payload.order_id] || []).forEach((cb) => cb({ event, data: payload.data }));
+    },
+  };
+
+  // ---------------------------------------------------------------------
+  // 4. DATE BUCKETING HELPERS (for Super Admin analytics — day/week/month/year)
+  // ---------------------------------------------------------------------
+  const THAI_MONTHS = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
+  function startOfDay(d) { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; }
+  function startOfWeek(d) { const x = startOfDay(d); const day = (x.getDay() + 6) % 7; x.setDate(x.getDate() - day); return x; } // Monday start
+  function startOfMonth(d) { return new Date(d.getFullYear(), d.getMonth(), 1); }
+  function startOfYear(d) { return new Date(d.getFullYear(), 0, 1); }
+  function stepDate(d, period, delta) {
+    const x = new Date(d);
+    if (period === 'day') x.setDate(x.getDate() + delta);
+    else if (period === 'week') x.setDate(x.getDate() + delta * 7);
+    else if (period === 'month') x.setMonth(x.getMonth() + delta);
+    else if (period === 'year') x.setFullYear(x.getFullYear() + delta);
+    return x;
+  }
+  function bucketConfig(period) {
+    const table = {
+      day: { count: 14, startFn: startOfDay, label: (d) => `${d.getDate()}/${d.getMonth() + 1}` },
+      week: { count: 10, startFn: startOfWeek, label: (d) => `${d.getDate()}/${d.getMonth() + 1}` },
+      month: { count: 12, startFn: startOfMonth, label: (d) => `${THAI_MONTHS[d.getMonth()]} ${d.getFullYear()}` },
+      year: { count: 5, startFn: startOfYear, label: (d) => `${d.getFullYear()}` },
+    };
+    return table[period] || table.day;
+  }
+  function buildBuckets(period) {
+    const cfg = bucketConfig(period);
+    const now = new Date();
+    const currentStart = cfg.startFn(now);
+    const starts = [];
+    for (let i = cfg.count - 1; i >= 0; i--) starts.push(stepDate(currentStart, period, -i));
+    return starts.map((start, i) => ({
+      start,
+      end: i + 1 < starts.length ? starts[i + 1] : stepDate(start, period, 1),
+      label: cfg.label(start),
+    }));
+  }
+
+  // ---------------------------------------------------------------------
+  // 5. API FUNCTIONS
+  // ---------------------------------------------------------------------
+  const STATUS_ORDER = ['pending', 'accepted', 'preparing', 'ready', 'completed'];
+
+  function hydrateOrder(order) {
+    const items = read(KEYS.orderItems, []).filter((i) => i.order_id === order.id);
+    return { ...order, order_id: order.id, items };
+  }
+
+  const ARIN_DB = {
+    // ---- Customer-facing (unchanged from v1) ----
+    getRestaurantMenu(restaurantId, tableNumber) {
+      const restaurant = read(KEYS.restaurants, []).find((r) => r.id === restaurantId);
+      if (!restaurant) return envelopeErr('RESTAURANT_NOT_FOUND', 'ไม่พบร้านนี้ในระบบ');
+      if (!restaurant.is_active) return envelopeErr('RESTAURANT_INACTIVE', 'ร้านปิดรับออเดอร์ชั่วคราว');
+      const table = read(KEYS.tables, []).find((t) => t.restaurant_id === restaurantId && t.table_number === tableNumber);
+      if (!table) return envelopeErr('TABLE_NOT_FOUND', 'ไม่พบโต๊ะนี้ กรุณาแจ้งพนักงาน');
+      const menu = read(KEYS.menuItems, []).filter((m) => m.restaurant_id === restaurantId);
+      return envelopeOk({ restaurant: { id: restaurant.id, name: restaurant.name, logo: restaurant.logo_url }, table: { id: table.id, table_number: table.table_number }, menu });
+    },
+
+    createOrder({ restaurant_id, table_id, items, idempotency_key }) {
+      const restaurant = read(KEYS.restaurants, []).find((r) => r.id === restaurant_id);
+      if (!restaurant || !restaurant.is_active) return envelopeErr('RESTAURANT_INACTIVE', 'ร้านปิดรับออเดอร์');
+      const table = read(KEYS.tables, []).find((t) => t.id === table_id);
+      if (!table) return envelopeErr('TABLE_NOT_FOUND', 'table_id ไม่ถูกต้อง');
+      if (!items || items.length === 0) return envelopeErr('EMPTY_ORDER', 'ตะกร้าว่าง');
+
+      const orders = read(KEYS.orders, []);
+      const dupe = orders.find((o) => o.idempotency_key === idempotency_key);
+      if (dupe) return envelopeOk(hydrateOrder(dupe));
+
+      const menuItems = read(KEYS.menuItems, []);
+      let total = 0;
+      const resolvedItems = [];
+      for (const it of items) {
+        if (!Number.isInteger(it.quantity) || it.quantity <= 0) return envelopeErr('INVALID_QUANTITY', 'จำนวนต้องมากกว่า 0');
+        const menuItem = menuItems.find((m) => m.id === it.menu_id);
+        if (!menuItem || !menuItem.available) return envelopeErr('MENU_ITEM_UNAVAILABLE', `"${menuItem ? menuItem.name : it.menu_id}" เพิ่งหมด`);
+        total += menuItem.price * it.quantity;
+        resolvedItems.push({ id: uid('oi'), menu_item_id: menuItem.id, menu_item_name: menuItem.name, unit_price: menuItem.price, quantity: it.quantity, note: (it.note || '').slice(0, 200) });
+      }
+
+      const order = { id: uid('ord'), restaurant_id, table_id, status: 'pending', total, idempotency_key: idempotency_key || uid('idem'), created_at: nowIso(), updated_at: nowIso() };
+      write(KEYS.orders, [...orders, order]);
+      write(KEYS.orderItems, [...read(KEYS.orderItems, []), ...resolvedItems.map((it) => ({ ...it, order_id: order.id }))]);
+
+      ARIN_REALTIME._emit('order.created', { restaurant_id, data: { order_id: order.id, table_number: table.table_number, total: order.total } });
+      return envelopeOk(hydrateOrder(order));
+    },
+
+    getOrder(orderId) {
+      const order = read(KEYS.orders, []).find((o) => o.id === orderId);
+      if (!order) return envelopeErr('ORDER_NOT_FOUND', 'ไม่พบออเดอร์นี้');
+      return envelopeOk(hydrateOrder(order));
+    },
+
+    // ---- Merchant auth (now returns role) ----
+    merchantLogin(email, password) {
+      const user = read(KEYS.merchantUsers, []).find((u) => u.email === email);
+      if (!user || user.password !== password) return envelopeErr('INVALID_CREDENTIALS', 'อีเมลหรือรหัสผ่านไม่ถูกต้อง');
+      if (user.is_locked) return envelopeErr('ACCOUNT_LOCKED', 'บัญชีถูกล็อก');
+      user.last_login_at = nowIso();
+      write(KEYS.merchantUsers, read(KEYS.merchantUsers, []).map((u) => (u.id === user.id ? user : u)));
+      const session = { access_token: uid('access'), refresh_token: uid('refresh'), restaurant_id: user.restaurant_id, email: user.email, role: user.role || 'staff', issued_at: Date.now(), expires_in: 3600 };
+      write(KEYS.session, session);
+      return envelopeOk({ ...session });
+    },
+    refreshToken(refresh_token) {
+      const session = read(KEYS.session, null);
+      if (!session || session.refresh_token !== refresh_token) return envelopeErr('REFRESH_TOKEN_EXPIRED', 'กรุณาเข้าสู่ระบบใหม่');
+      session.access_token = uid('access'); session.issued_at = Date.now();
+      write(KEYS.session, session);
+      return envelopeOk({ access_token: session.access_token, expires_in: 3600 });
+    },
+    logout() { localStorage.removeItem(KEYS.session); },
+    getSession() { return read(KEYS.session, null); },
+
+    // ---- Merchant order console (staff + owner) ----
+    listMerchantOrders(restaurantId) {
+      const active = STATUS_ORDER.filter((s) => s !== 'completed');
+      const orders = read(KEYS.orders, []).filter((o) => o.restaurant_id === restaurantId && active.includes(o.status)).sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+      const tables = read(KEYS.tables, []);
+      const orderItems = read(KEYS.orderItems, []);
+      return envelopeOk({ orders: orders.map((o) => ({ order_id: o.id, table_number: (tables.find((t) => t.id === o.table_id) || {}).table_number || '?', status: o.status, total: o.total, item_count: orderItems.filter((i) => i.order_id === o.id).reduce((n, i) => n + i.quantity, 0), created_at: o.created_at })) });
+    },
+    getMerchantOrderDetail(orderId, restaurantId) {
+      const order = read(KEYS.orders, []).find((o) => o.id === orderId);
+      if (!order) return envelopeErr('ORDER_NOT_FOUND', 'ไม่พบออเดอร์');
+      if (order.restaurant_id !== restaurantId) return envelopeErr('FORBIDDEN', 'ออเดอร์นี้ไม่ใช่ของร้านนี้');
+      return envelopeOk(hydrateOrder(order));
+    },
+    updateOrderStatus(orderId, restaurantId, newStatus) {
+      const orders = read(KEYS.orders, []);
+      const order = orders.find((o) => o.id === orderId);
+      if (!order) return envelopeErr('ORDER_NOT_FOUND', 'ไม่พบออเดอร์');
+      if (order.restaurant_id !== restaurantId) return envelopeErr('FORBIDDEN', 'ไม่มีสิทธิ์แก้ไขออเดอร์นี้');
+      const currentIdx = STATUS_ORDER.indexOf(order.status);
+      const nextIdx = STATUS_ORDER.indexOf(newStatus);
+      if (nextIdx !== currentIdx + 1) return envelopeErr('INVALID_STATUS_TRANSITION', 'ไม่สามารถข้ามสถานะได้');
+      order.status = newStatus; order.updated_at = nowIso();
+      write(KEYS.orders, orders.map((o) => (o.id === order.id ? order : o)));
+      ARIN_REALTIME._emit('order.updated', { restaurant_id: restaurantId, order_id: order.id, data: { order_id: order.id, status: newStatus } });
+      return envelopeOk(hydrateOrder(order));
+    },
+
+    // =====================================================================
+    // NEW — OWNER-ONLY RESTAURANT SELF-SERVICE MANAGEMENT
+    // Every function below double-checks restaurant_id ownership, mirroring
+    // AC-6.3's FORBIDDEN pattern, so a staff/owner token from one restaurant
+    // can never read or edit another restaurant's data.
+    // =====================================================================
+    updateRestaurantProfile(restaurantId, patch) {
+      const restaurants = read(KEYS.restaurants, []);
+      const restaurant = restaurants.find((r) => r.id === restaurantId);
+      if (!restaurant) return envelopeErr('RESTAURANT_NOT_FOUND', 'ไม่พบร้าน');
+      const updated = { ...restaurant, ...patch, updated_at: nowIso() };
+      write(KEYS.restaurants, restaurants.map((r) => (r.id === restaurantId ? updated : r)));
+      return envelopeOk(updated);
+    },
+
+    listMenuItemsForOwner(restaurantId) {
+      return envelopeOk({ menu: read(KEYS.menuItems, []).filter((m) => m.restaurant_id === restaurantId).sort((a, b) => (a.category || '').localeCompare(b.category || '')) });
+    },
+    createMenuItem(restaurantId, item) {
+      if (!item.name || item.name.trim() === '') return envelopeErr('VALIDATION_ERROR', 'กรุณาใส่ชื่อเมนู');
+      if (typeof item.price !== 'number' || item.price < 0) return envelopeErr('VALIDATION_ERROR', 'ราคาต้องไม่ติดลบ');
+      const menuItems = read(KEYS.menuItems, []);
+      const newItem = { id: uid('menu'), restaurant_id: restaurantId, name: item.name.trim(), description: item.description || '', price: item.price, category: item.category || 'เมนู', image_url: item.image_url || '', available: item.available !== false, created_at: nowIso(), updated_at: nowIso() };
+      write(KEYS.menuItems, [...menuItems, newItem]);
+      return envelopeOk(newItem);
+    },
+    updateMenuItem(menuItemId, restaurantId, patch) {
+      const menuItems = read(KEYS.menuItems, []);
+      const item = menuItems.find((m) => m.id === menuItemId);
+      if (!item) return envelopeErr('MENU_ITEM_NOT_FOUND', 'ไม่พบเมนูนี้');
+      if (item.restaurant_id !== restaurantId) return envelopeErr('FORBIDDEN', 'ไม่มีสิทธิ์แก้ไขเมนูนี้');
+      if (patch.price !== undefined && (typeof patch.price !== 'number' || patch.price < 0)) return envelopeErr('VALIDATION_ERROR', 'ราคาต้องไม่ติดลบ');
+      const updated = { ...item, ...patch, updated_at: nowIso() };
+      write(KEYS.menuItems, menuItems.map((m) => (m.id === menuItemId ? updated : m)));
+      return envelopeOk(updated);
+    },
+    deleteMenuItem(menuItemId, restaurantId) {
+      const menuItems = read(KEYS.menuItems, []);
+      const item = menuItems.find((m) => m.id === menuItemId);
+      if (!item) return envelopeErr('MENU_ITEM_NOT_FOUND', 'ไม่พบเมนูนี้');
+      if (item.restaurant_id !== restaurantId) return envelopeErr('FORBIDDEN', 'ไม่มีสิทธิ์ลบเมนูนี้');
+      // Mirrors DB spec §7: order_items.menu_item_id is ON DELETE RESTRICT —
+      // a menu item referenced by any historical order can't be hard-deleted.
+      const referenced = read(KEYS.orderItems, []).some((oi) => oi.menu_item_id === menuItemId);
+      if (referenced) return envelopeErr('MENU_ITEM_IN_USE', 'เมนูนี้เคยถูกสั่งแล้ว ลบไม่ได้ — ปิดการขายแทนได้');
+      write(KEYS.menuItems, menuItems.filter((m) => m.id !== menuItemId));
+      return envelopeOk({ deleted: true });
+    },
+
+    listTables(restaurantId) {
+      return envelopeOk({ tables: read(KEYS.tables, []).filter((t) => t.restaurant_id === restaurantId).sort((a, b) => a.table_number.localeCompare(b.table_number, 'th', { numeric: true })) });
+    },
+    createTable(restaurantId, tableNumber) {
+      const num = String(tableNumber).trim();
+      if (!num) return envelopeErr('VALIDATION_ERROR', 'กรุณาใส่หมายเลขโต๊ะ');
+      const tables = read(KEYS.tables, []);
+      // Mirrors DB spec §3: UNIQUE (restaurant_id, table_number)
+      if (tables.some((t) => t.restaurant_id === restaurantId && t.table_number === num)) return envelopeErr('TABLE_NUMBER_TAKEN', `โต๊ะ ${num} มีอยู่แล้ว`);
+      const table = { id: uid('table'), restaurant_id: restaurantId, table_number: num, qr_code_url: '', created_at: nowIso() };
+      write(KEYS.tables, [...tables, table]);
+      return envelopeOk(table);
+    },
+    deleteTable(tableId, restaurantId) {
+      const tables = read(KEYS.tables, []);
+      const table = tables.find((t) => t.id === tableId);
+      if (!table) return envelopeErr('TABLE_NOT_FOUND', 'ไม่พบโต๊ะนี้');
+      if (table.restaurant_id !== restaurantId) return envelopeErr('FORBIDDEN', 'ไม่มีสิทธิ์ลบโต๊ะนี้');
+      const hasActiveOrder = read(KEYS.orders, []).some((o) => o.table_id === tableId && o.status !== 'completed');
+      if (hasActiveOrder) return envelopeErr('TABLE_HAS_ACTIVE_ORDER', 'โต๊ะนี้มีออเดอร์ค้างอยู่ ลบไม่ได้ตอนนี้');
+      write(KEYS.tables, tables.filter((t) => t.id !== tableId));
+      return envelopeOk({ deleted: true });
+    },
+    // Builds the URL a printed QR code should point to. `baseUrl` lets the
+    // owner point it at wherever customer-app.html is actually hosted.
+    buildCustomerLink(baseUrl, restaurantId, tableNumber) {
+      const base = (baseUrl || 'customer-app.html').replace(/\/$/, '');
+      return `${base}?restaurant_id=${encodeURIComponent(restaurantId)}&table=${encodeURIComponent(tableNumber)}`;
+    },
+
+    // =====================================================================
+    // NEW — SUPER ADMIN (platform level, separate auth from merchant_users)
+    // =====================================================================
+    adminLogin(email, password) {
+      const admin = read(KEYS.adminUsers, []).find((a) => a.email === email);
+      if (!admin || admin.password !== password) return envelopeErr('INVALID_CREDENTIALS', 'อีเมลหรือรหัสผ่านไม่ถูกต้อง');
+      const session = { access_token: uid('admin_access'), name: admin.name, email: admin.email, issued_at: Date.now() };
+      write(KEYS.adminSession, session);
+      return envelopeOk(session);
+    },
+    adminLogout() { localStorage.removeItem(KEYS.adminSession); },
+    getAdminSession() { return read(KEYS.adminSession, null); },
+
+    adminListRestaurants() {
+      const restaurants = read(KEYS.restaurants, []);
+      const orders = read(KEYS.orders, []);
+      const todayStart = startOfDay(new Date());
+      return envelopeOk({
+        restaurants: restaurants.map((r) => {
+          const rOrders = orders.filter((o) => o.restaurant_id === r.id);
+          const todayOrders = rOrders.filter((o) => new Date(o.created_at) >= todayStart);
+          return {
+            id: r.id, name: r.name, is_active: r.is_active,
+            total_orders: rOrders.length,
+            total_revenue: rOrders.reduce((s, o) => s + o.total, 0),
+            today_orders: todayOrders.length,
+            today_revenue: todayOrders.reduce((s, o) => s + o.total, 0),
+          };
+        }),
+      });
+    },
+
+    // restaurantId = null means "all restaurants combined"
+    adminGetSalesSeries(restaurantId, period) {
+      const buckets = buildBuckets(period);
+      const orders = read(KEYS.orders, []).filter((o) => !restaurantId || o.restaurant_id === restaurantId);
+      const series = buckets.map((b) => {
+        const inBucket = orders.filter((o) => { const t = new Date(o.created_at); return t >= b.start && t < b.end; });
+        return { label: b.label, revenue: inBucket.reduce((s, o) => s + o.total, 0), orders: inBucket.length };
+      });
+      return envelopeOk({ period, series });
+    },
+
+    adminGetMenuBreakdown(restaurantId, period) {
+      const buckets = buildBuckets(period);
+      const rangeStart = buckets[0].start;
+      const orders = read(KEYS.orders, []).filter((o) => (!restaurantId || o.restaurant_id === restaurantId) && new Date(o.created_at) >= rangeStart);
+      const orderIds = new Set(orders.map((o) => o.id));
+      const items = read(KEYS.orderItems, []).filter((oi) => orderIds.has(oi.order_id));
+      const byName = {};
+      items.forEach((it) => {
+        byName[it.menu_item_name] = byName[it.menu_item_name] || { name: it.menu_item_name, quantity: 0, revenue: 0 };
+        byName[it.menu_item_name].quantity += it.quantity;
+        byName[it.menu_item_name].revenue += it.quantity * it.unit_price;
+      });
+      const breakdown = Object.values(byName).sort((a, b) => b.revenue - a.revenue);
+      return envelopeOk({ period, breakdown });
+    },
+  };
+
+  // ---------------------------------------------------------------------
+  // 6. EXPORT
+  // ---------------------------------------------------------------------
+  seed();
+  global.ARIN_DB = ARIN_DB;
+  global.ARIN_REALTIME = ARIN_REALTIME;
+  global.ARIN_UTIL = { uid, nowIso, STATUS_ORDER };
+})(window);
+
+/*
+ * PRODUCTION MAPPING (what to replace when wiring to a real backend):
+ * ----------------------------------------------------------------------
+ * ARIN_DB.updateRestaurantProfile   -> PATCH /merchant/restaurant                (new endpoint, owner-only)
+ * ARIN_DB.listMenuItemsForOwner     -> GET   /merchant/menu                      (new endpoint, owner-only)
+ * ARIN_DB.createMenuItem            -> POST  /merchant/menu
+ * ARIN_DB.updateMenuItem            -> PATCH /merchant/menu/{menu_id}
+ * ARIN_DB.deleteMenuItem            -> DELETE /merchant/menu/{menu_id}
+ * ARIN_DB.listTables/createTable/deleteTable -> /merchant/tables endpoints (new)
+ * ARIN_DB.adminLogin                -> POST  /admin/auth/login                   (fully separate auth realm from merchant JWTs)
+ * ARIN_DB.adminListRestaurants      -> GET   /admin/restaurants
+ * ARIN_DB.adminGetSalesSeries       -> GET   /admin/analytics/sales?restaurant_id=&period=
+ * ARIN_DB.adminGetMenuBreakdown     -> GET   /admin/analytics/menu-breakdown?restaurant_id=&period=
+ * All of the above are NEW endpoints — none exist yet in ARIN-API-QR-001 v1.0.
+ * merchant_users.role should be added as a NOT NULL column, default 'staff',
+ * CHECK (role IN ('owner','staff')) in ARIN-DB-QR-001 §5.
+ */
+
+/*
+ * PRODUCTION MAPPING (what to replace when wiring to a real backend):
+ * ----------------------------------------------------------------------
+ * ARIN_DB.updateRestaurantProfile   -> PATCH /merchant/restaurant                (new endpoint, owner-only)
+ * ARIN_DB.listMenuItemsForOwner     -> GET   /merchant/menu                      (new endpoint, owner-only)
+ * ARIN_DB.createMenuItem            -> POST  /merchant/menu
+ * ARIN_DB.updateMenuItem            -> PATCH /merchant/menu/{menu_id}
+ * ARIN_DB.deleteMenuItem            -> DELETE /merchant/menu/{menu_id}
+ * ARIN_DB.listTables/createTable/deleteTable -> /merchant/tables endpoints (new)
+ * ARIN_DB.adminLogin                -> POST  /admin/auth/login                   (fully separate auth realm from merchant JWTs)
+ * ARIN_DB.adminListRestaurants      -> GET   /admin/restaurants
+ * ARIN_DB.adminGetSalesSeries       -> GET   /admin/analytics/sales?restaurant_id=&period=
+ * ARIN_DB.adminGetMenuBreakdown     -> GET   /admin/analytics/menu-breakdown?restaurant_id=&period=
+ * All of the above are NEW endpoints — none exist yet in ARIN-API-QR-001 v1.0.
+ * merchant_users.role should be added as a NOT NULL column, default 'staff',
+ * CHECK (role IN ('owner','staff')) in ARIN-DB-QR-001 §5.
+ */
+
+</script>
+<script>
+/* =========================================================================
+ * ARIN QR ORDERING — CUSTOMER APP
+ * State machine screens: entry -> error / empty / menu <-> cart -> tracking
+ * ========================================================================= */
+
+const app = document.getElementById('app');
+const params = new URLSearchParams(location.search);
+
+// ---- 1. QR ENTRY: pull restaurant_id + table straight from the URL (AC-1.1) ----
+const restaurantId = params.get('restaurant_id');
+const tableNumber = params.get('table');
+const directOrderId = params.get('order'); // deep-link back into an in-flight order (E15)
+
+const state = {
+  restaurant: null,
+  table: null,
+  menu: [],
+  cart: {},          // { menu_id: { quantity, note } }
+  cartOpen: false,
+  submitting: false,
+  order: null,       // current tracking order
+  idempotencyKey: null,
+  wsMode: 'live',     // 'live' | 'polling' — surfaced in UI so the fallback (E16) is visible
+};
+
+function money(n) { return '฿' + Number(n).toLocaleString('th-TH'); }
+function escapeHtml(s) { return (s || '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+// ---- offline banner (E4) ----
+function syncOfflineBanner() {
+  document.getElementById('offline-banner').classList.toggle('hidden', navigator.onLine);
+}
+window.addEventListener('online', syncOfflineBanner);
+window.addEventListener('offline', syncOfflineBanner);
+syncOfflineBanner();
+
+/* -------------------------------------------------------------------------
+ * SCREEN: full-page error (used for E2 table not found, E3 inactive,
+ * E25 restaurant not found — friendly page, never a raw 404)
+ * ---------------------------------------------------------------------- */
+function renderError(icon, title, message) {
+  app.innerHTML = `
+    <div class="min-h-screen flex flex-col items-center justify-center px-8 text-center fade-in">
+      <div class="w-20 h-20 rounded-full bg-navy-900/5 flex items-center justify-center text-4xl mb-6">${icon}</div>
+      <h1 class="font-display font-semibold text-xl text-navy-900 mb-2">${escapeHtml(title)}</h1>
+      <p class="text-slate-500 text-sm leading-relaxed">${escapeHtml(message)}</p>
+    </div>`;
+}
+
+function renderMissingQr() {
+  // Dev convenience only — a real QR always carries restaurant_id + table.
+  const demoTables = ARIN_DB.getRestaurantMenu('rest_001', '01'); // just to confirm seed exists
+  app.innerHTML = `
+    <div class="min-h-screen flex flex-col items-center justify-center px-8 text-center fade-in">
+      <div class="w-14 h-14 rounded-2xl bg-navy-900 flex items-center justify-center text-flamingo-400 font-display font-bold text-lg mb-6">A</div>
+      <h1 class="font-display font-semibold text-lg text-navy-900 mb-2">ลิงก์นี้ไม่มีข้อมูลโต๊ะ</h1>
+      <p class="text-slate-500 text-sm mb-6">โหมดทดสอบ — เลือกโต๊ะจำลองเพื่อดูหน้าเมนู</p>
+      <div class="grid grid-cols-4 gap-2">
+        ${[1,2,3,4].map(n => `<a href="?restaurant_id=rest_001&table=0${n}" class="py-3 rounded-xl bg-white border border-navy-900/10 shadow-card text-sm font-medium text-navy-900">โต๊ะ 0${n}</a>`).join('')}
+      </div>
+    </div>`;
+}
+
+/* -------------------------------------------------------------------------
+ * SCREEN: menu
+ * ---------------------------------------------------------------------- */
+function renderMenu() {
+  const categories = [...new Set(state.menu.map(m => m.category || 'เมนู'))];
+  const cartCount = Object.values(state.cart).reduce((n, c) => n + c.quantity, 0);
+  const cartTotal = Object.entries(state.cart).reduce((sum, [id, c]) => {
+    const item = state.menu.find(m => m.id === id);
+    return sum + (item ? item.price * c.quantity : 0);
+  }, 0);
+
+  app.innerHTML = `
+    <header class="bg-navy-900 text-white px-5 pt-7 pb-6 rounded-b-3xl">
+      <p class="text-flamingo-300 text-xs font-semibold tracking-wide uppercase mb-1">โต๊ะ ${escapeHtml(state.table.table_number)}</p>
+      <h1 class="font-display font-semibold text-2xl">${escapeHtml(state.restaurant.name)}</h1>
+      <p class="text-white/50 text-xs mt-1">เมนูอัปเดตล่าสุด • สแกนใหม่เพื่อรีเฟรชราคา</p>
+    </header>
+
+    ${state.menu.length === 0 ? `
+      <div class="text-center px-8 py-20 fade-in">
+        <p class="text-4xl mb-3">🍽️</p>
+        <p class="text-navy-900 font-medium mb-1">ร้านยังไม่ได้เพิ่มเมนู</p>
+        <p class="text-slate-500 text-sm">กรุณาแจ้งพนักงาน</p>
+      </div>` : categories.map(cat => `
+      <section class="px-5 mt-6">
+        <h2 class="font-display font-semibold text-sm text-navy-900/70 uppercase tracking-wide mb-3">${escapeHtml(cat)}</h2>
+        <div class="space-y-3">
+          ${state.menu.filter(m => (m.category || 'เมนู') === cat).map(renderMenuCard).join('')}
+        </div>
+      </section>`).join('')
+    }
+
+    <div class="h-6"></div>
+
+    ${cartCount > 0 ? `
+    <button id="open-cart" class="fixed bottom-5 left-1/2 -translate-x-1/2 w-[calc(100%-2.5rem)] max-w-md bg-flamingo-500 text-white rounded-2xl shadow-float px-5 py-4 flex items-center justify-between font-medium fade-in">
+      <span class="flex items-center gap-2">
+        <span class="bg-white/25 rounded-full w-6 h-6 flex items-center justify-center text-xs font-bold">${cartCount}</span>
+        ดูตะกร้า
+      </span>
+      <span class="font-display font-semibold">${money(cartTotal)}</span>
+    </button>` : ''}
+  `;
+
+  document.getElementById('open-cart')?.addEventListener('click', () => { state.cartOpen = true; renderCartDrawer(); });
+  state.menu.forEach(m => {
+    document.getElementById('qty-plus-' + m.id)?.addEventListener('click', () => changeQty(m.id, +1));
+    document.getElementById('qty-minus-' + m.id)?.addEventListener('click', () => changeQty(m.id, -1));
+    document.getElementById('note-' + m.id)?.addEventListener('input', (e) => {
+      state.cart[m.id] = state.cart[m.id] || { quantity: 1, note: '' };
+      state.cart[m.id].note = e.target.value.slice(0, 200); // E14 cap
+      document.getElementById('note-count-' + m.id).textContent = state.cart[m.id].note.length + '/200';
+    });
+  });
+}
+
+function renderMenuCard(m) {
+  const inCart = state.cart[m.id];
+  const qty = inCart ? inCart.quantity : 0;
+  const unavailable = !m.available; // E7
+  return `
+    <div class="bg-white rounded-2xl shadow-card p-3 flex gap-3 ${unavailable ? 'opacity-50' : ''}">
+      <div class="w-20 h-20 rounded-xl menu-img flex-shrink-0 flex items-center justify-center text-2xl overflow-hidden">
+        ${m.image_url ? `<img src="${m.image_url}" class="w-full h-full object-cover" onerror="this.parentElement.innerHTML='🍲'">` : '🍲'}
+      </div>
+      <div class="flex-1 min-w-0">
+        <div class="flex items-start justify-between gap-2">
+          <p class="font-medium text-navy-900 text-sm leading-snug">${escapeHtml(m.name)}</p>
+          ${unavailable ? '<span class="flex-shrink-0 text-[10px] font-semibold bg-navy-900/10 text-navy-900/70 px-2 py-0.5 rounded-full">หมด</span>' : ''}
+        </div>
+        <p class="text-slate-400 text-xs mt-0.5 line-clamp-2">${escapeHtml(m.description || '')}</p>
+        <div class="flex items-center justify-between mt-2">
+          <p class="font-display font-semibold text-navy-900 text-sm">${money(m.price)}</p>
+          ${unavailable ? `
+            <button disabled class="w-8 h-8 rounded-full bg-navy-900/10 text-navy-900/30 text-lg leading-none">+</button>
+          ` : qty === 0 ? `
+            <button id="qty-plus-${m.id}" class="w-8 h-8 rounded-full bg-flamingo-500 text-white text-lg leading-none active:scale-95 transition">+</button>
+          ` : `
+            <div class="flex items-center gap-2">
+              <button id="qty-minus-${m.id}" class="w-8 h-8 rounded-full bg-navy-900/10 text-navy-900 text-lg leading-none">−</button>
+              <span class="w-4 text-center text-sm font-semibold">${qty}</span>
+              <button id="qty-plus-${m.id}" class="w-8 h-8 rounded-full bg-flamingo-500 text-white text-lg leading-none active:scale-95 transition">+</button>
+            </div>`}
+        </div>
+        ${qty > 0 ? `
+          <div class="mt-2">
+            <textarea id="note-${m.id}" rows="1" maxlength="200" placeholder="โน้ตถึงร้าน เช่น ไม่ใส่ผัก"
+              class="w-full text-xs bg-paper rounded-lg px-2 py-1.5 border border-navy-900/5 focus:outline-none focus:ring-1 focus:ring-flamingo-400 resize-none">${escapeHtml(inCart.note || '')}</textarea>
+            <p id="note-count-${m.id}" class="text-[10px] text-slate-400 text-right mt-0.5">${(inCart.note||'').length}/200</p>
+          </div>` : ''}
+      </div>
+    </div>`;
+}
+
+function changeQty(menuId, delta) {
+  const current = state.cart[menuId] || { quantity: 0, note: '' };
+  const next = Math.max(0, current.quantity + delta);
+  if (next === 0) delete state.cart[menuId];
+  else state.cart[menuId] = { ...current, quantity: next };
+  state.idempotencyKey = null; // cart changed -> any previous submit attempt is void
+  if (state.cartOpen) renderCartDrawer(); else renderMenu();
+}
+
+/* -------------------------------------------------------------------------
+ * SCREEN: cart drawer  (AC-3.1, AC-3.2, AC-3.3, AC-3.4, AC-3.6)
+ * ---------------------------------------------------------------------- */
+function renderCartDrawer(conflictInfo) {
+  const entries = Object.entries(state.cart);
+  const total = entries.reduce((sum, [id, c]) => sum + (state.menu.find(m => m.id === id)?.price || 0) * c.quantity, 0);
+  const empty = entries.length === 0; // AC-3.1 / E9
+
+  const existing = document.getElementById('cart-overlay');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'cart-overlay';
+  overlay.className = 'fixed inset-0 z-40';
+  overlay.innerHTML = `
+    <div class="absolute inset-0 bg-navy-900/40" id="cart-backdrop"></div>
+    <div id="cart-panel" class="drawer-enter absolute bottom-0 inset-x-0 max-w-md mx-auto bg-white rounded-t-3xl shadow-float max-h-[85vh] flex flex-col">
+      <div class="w-10 h-1 bg-navy-900/15 rounded-full mx-auto mt-3"></div>
+      <div class="px-5 pt-4 pb-2 flex items-center justify-between">
+        <h2 class="font-display font-semibold text-lg text-navy-900">ตะกร้าของคุณ</h2>
+        <button id="cart-close" class="text-slate-400 text-sm">ปิด</button>
+      </div>
+
+      ${conflictInfo ? `
+        <div class="mx-5 mb-2 bg-flamingo-100 border border-flamingo-300 rounded-xl px-4 py-3 text-sm text-navy-900">
+          <p class="font-semibold mb-1">⚠️ มีเมนูเพิ่งหมด</p>
+          <p class="text-xs text-navy-900/70">${escapeHtml(conflictInfo)} — ลบออกจากตะกร้าแล้วสั่งรายการที่เหลือได้เลย</p>
+        </div>` : ''}
+
+      <div class="flex-1 overflow-y-auto px-5 space-y-3 pb-3">
+        ${empty ? `<p class="text-center text-slate-400 text-sm py-10">ยังไม่ได้เลือกเมนู</p>` :
+          entries.map(([id, c]) => {
+            const m = state.menu.find(x => x.id === id);
+            return `
+            <div class="flex gap-3 items-start border-b border-navy-900/5 pb-3">
+              <div class="flex-1">
+                <p class="text-sm font-medium text-navy-900">${escapeHtml(m.name)}</p>
+                ${c.note ? `<p class="text-xs text-slate-400 mt-0.5">โน้ต: ${escapeHtml(c.note)}</p>` : ''}
+                <p class="text-xs text-slate-400 mt-0.5">${money(m.price)} x ${c.quantity}</p>
+              </div>
+              <div class="flex items-center gap-2">
+                <button data-minus="${id}" class="w-7 h-7 rounded-full bg-navy-900/10 text-sm">−</button>
+                <span class="text-sm w-4 text-center">${c.quantity}</span>
+                <button data-plus="${id}" class="w-7 h-7 rounded-full bg-flamingo-500 text-white text-sm">+</button>
+              </div>
+            </div>`;
+          }).join('')}
+      </div>
+
+      <div class="px-5 py-4 border-t border-navy-900/5">
+        <div class="flex items-center justify-between mb-3">
+          <span class="text-slate-500 text-sm">ยอดรวม</span>
+          <span class="font-display font-semibold text-xl text-navy-900">${money(total)}</span>
+        </div>
+        <button id="place-order" ${empty || state.submitting ? 'disabled' : ''}
+          class="w-full py-4 rounded-2xl font-semibold text-white transition ${empty ? 'bg-navy-900/15 cursor-not-allowed' : 'bg-flamingo-500 active:scale-[0.98]'}">
+          ${state.submitting ? 'กำลังส่งออเดอร์...' : 'ยืนยันสั่งอาหาร'}
+        </button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  requestAnimationFrame(() => document.getElementById('cart-panel').classList.add('drawer-open'));
+
+  const close = () => { state.cartOpen = false; overlay.remove(); renderMenu(); };
+  document.getElementById('cart-backdrop').addEventListener('click', close);
+  document.getElementById('cart-close').addEventListener('click', close);
+  overlay.querySelectorAll('[data-plus]').forEach(b => b.addEventListener('click', () => changeQty(b.dataset.plus, +1)));
+  overlay.querySelectorAll('[data-minus]').forEach(b => b.addEventListener('click', () => changeQty(b.dataset.minus, -1)));
+  document.getElementById('place-order')?.addEventListener('click', submitOrder);
+}
+
+/* -------------------------------------------------------------------------
+ * SUBMIT ORDER  (AC-3.3 confirm <2s, AC-3.4 no dupes, AC-3.5 conflict recovery,
+ * E12 retry-on-failure, E13 quantity validation client-side before send)
+ * ---------------------------------------------------------------------- */
+async function submitOrder() {
+  if (state.submitting) return; // guards double-tap on top of the disabled attribute (E11)
+  const items = Object.entries(state.cart).map(([menu_id, c]) => ({ menu_id, quantity: c.quantity, note: c.note || '' }));
+  if (items.some(i => i.quantity <= 0)) return; // client-side guard (E13) — server re-validates too
+
+  state.submitting = true;
+  if (!state.idempotencyKey) state.idempotencyKey = ARIN_UTIL.uid('idem'); // same key survives retries (E11)
+  renderCartDrawer();
+
+  const attempt = (retriesLeft) => {
+    // PRODUCTION: POST https://api.arinworks.co/v1/orders  { restaurant_id, table_id, items }
+    // with header Idempotency-Key: <state.idempotencyKey>
+    const res = ARIN_DB.createOrder({
+      restaurant_id: state.restaurant.id,
+      table_id: state.table.id,
+      items,
+      idempotency_key: state.idempotencyKey,
+    });
+
+    if (!navigator.onLine && retriesLeft > 0) { // E12: retry automatically while offline, then surface a manual retry
+      setTimeout(() => attempt(retriesLeft - 1), 1200);
+      return;
+    }
+
+    if (!res.success) {
+      state.submitting = false;
+      if (res.error.code === 'MENU_ITEM_UNAVAILABLE') {
+        // AC-3.5 / E10: tell them exactly what's gone, let them drop it and keep the rest
+        const badId = Object.keys(state.cart).find(id => !state.menu.find(m => m.id === id)?.available);
+        const badName = state.menu.find(m => m.id === badId)?.name || res.error.message;
+        if (badId) delete state.cart[badId];
+        state.idempotencyKey = null;
+        renderCartDrawer(badName);
+        return;
+      }
+      renderCartDrawer('ส่งไม่สำเร็จ: ' + res.error.message + ' — กดยืนยันอีกครั้ง');
+      return;
+    }
+
+    // success
+    state.order = res.data;
+    state.cart = {};
+    localStorage.setItem('arin_last_order_' + state.restaurant.id + '_' + state.table.table_number, res.data.order_id);
+    document.getElementById('cart-overlay')?.remove();
+    renderTracking();
+  };
+
+  attempt(3);
+}
+
+/* -------------------------------------------------------------------------
+ * SCREEN: order tracking  (AC-4.1 live update <2s, AC-4.2 polling fallback,
+ * AC-4.3 resume via order_id, E15, E16)
+ * ---------------------------------------------------------------------- */
+const STEP_LABEL = { pending: 'รับออเดอร์แล้ว', accepted: 'ร้านรับออเดอร์', preparing: 'กำลังปรุง', ready: 'พร้อมเสิร์ฟ', completed: 'เสร็จสิ้น' };
+
+function renderTracking() {
+  const order = state.order;
+  const steps = ARIN_UTIL.STATUS_ORDER;
+  const currentIdx = steps.indexOf(order.status);
+
+  app.innerHTML = `
+    <header class="bg-navy-900 text-white px-5 pt-7 pb-8 rounded-b-3xl">
+      <div class="flex items-center justify-between mb-1">
+        <p class="text-flamingo-300 text-xs font-semibold tracking-wide uppercase">ออเดอร์ #${order.order_id.slice(-6)}</p>
+        <span id="ws-badge" class="text-[10px] px-2 py-0.5 rounded-full ${state.wsMode==='live' ? 'bg-flamingo-500/20 text-flamingo-300' : 'bg-white/10 text-white/60'}">
+          ${state.wsMode === 'live' ? '● เรียลไทม์' : '↻ อัปเดตทุก 5 วิ'}
+        </span>
+      </div>
+      <h1 class="font-display font-semibold text-2xl">${STEP_LABEL[order.status]}</h1>
+      <p class="text-white/50 text-xs mt-1">โต๊ะ ${escapeHtml(state.table.table_number)} • ${escapeHtml(state.restaurant.name)}</p>
+    </header>
+
+    <div class="px-6 mt-8">
+      <div class="flex items-center">
+        ${steps.map((s, i) => `
+          <div class="flex items-center ${i < steps.length - 1 ? 'flex-1' : ''}">
+            <div class="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0
+              ${i <= currentIdx ? 'bg-flamingo-500 text-white' : 'bg-navy-900/10 text-navy-900/30'}
+              ${i === currentIdx ? 'pulse-dot' : ''}">
+              ${i < currentIdx ? '✓' : i + 1}
+            </div>
+            ${i < steps.length - 1 ? `<div class="flex-1 h-0.5 mx-1 ${i < currentIdx ? 'bg-flamingo-500' : 'bg-navy-900/10'}"></div>` : ''}
+          </div>`).join('')}
+      </div>
+      <div class="flex justify-between mt-2">
+        ${steps.map((s, i) => `<span class="text-[10px] w-8 text-center -ml-4 first:ml-0 ${i<=currentIdx?'text-navy-900 font-medium':'text-slate-400'}">${STEP_LABEL[s]}</span>`).join('')}
+      </div>
+    </div>
+
+    <div class="mx-5 mt-8 bg-white rounded-2xl shadow-card p-4">
+      <h2 class="font-display font-semibold text-sm text-navy-900 mb-3">รายการอาหาร</h2>
+      <div class="space-y-2">
+        ${order.items.map(it => `
+          <div class="flex justify-between text-sm">
+            <span class="text-navy-900/80">${it.quantity}x ${escapeHtml(it.menu_item_name)}</span>
+            <span class="text-navy-900 font-medium">${money(it.unit_price * it.quantity)}</span>
+          </div>
+          ${it.note ? `<p class="text-xs text-slate-400 pl-1">— ${escapeHtml(it.note)}</p>` : ''}
+        `).join('')}
+      </div>
+      <div class="flex justify-between mt-3 pt-3 border-t border-navy-900/5">
+        <span class="font-medium text-navy-900">ยอดรวม</span>
+        <span class="font-display font-semibold text-navy-900">${money(order.total)}</span>
+      </div>
+    </div>
+
+    <p class="text-center text-slate-400 text-xs mt-6 px-8">หน้านี้อัปเดตสถานะอัตโนมัติ — ปิดแอปหรือสลับหน้าจอได้ กลับมาแล้วยังเห็นสถานะล่าสุด</p>
+  `;
+}
+
+let pollTimer = null;
+function startTrackingSync(orderId) {
+  // PRODUCTION: open WSS /ws/orders/{order_id}; on close/error fall back to the
+  // polling interval below (API spec §6.2, AC-4.2, E16).
+  const unsubscribe = ARIN_REALTIME.subscribeOrder(orderId, ({ data }) => {
+    if (state.order && data.status && state.order.order_id === orderId) {
+      state.order.status = data.status;
+      renderTracking();
+    }
+  });
+
+  // Polling fallback — always running underneath in this demo so status
+  // never goes stale even if the realtime channel silently drops.
+  pollTimer = setInterval(() => {
+    const res = ARIN_DB.getOrder(orderId);
+    if (res.success && state.order && res.data.status !== state.order.status) {
+      state.order = res.data;
+      renderTracking();
+    }
+  }, 5000);
+
+  window.addEventListener('beforeunload', () => { unsubscribe(); clearInterval(pollTimer); });
+}
+
+/* -------------------------------------------------------------------------
+ * BOOT
+ * ---------------------------------------------------------------------- */
+function boot() {
+  if (!restaurantId || !tableNumber) { renderMissingQr(); return; }
+
+  const res = ARIN_DB.getRestaurantMenu(restaurantId, tableNumber);
+  if (!res.success) {
+    const icon = res.error.code === 'TABLE_NOT_FOUND' ? '📍' : res.error.code === 'RESTAURANT_INACTIVE' ? '🌙' : '❓';
+    const title = res.error.code === 'TABLE_NOT_FOUND' ? 'ไม่พบโต๊ะนี้' : res.error.code === 'RESTAURANT_INACTIVE' ? 'ร้านปิดรับออเดอร์ชั่วคราว' : 'ไม่พบร้านนี้';
+    renderError(icon, title, res.error.message + (res.error.code === 'TABLE_NOT_FOUND' ? ' กรุณาแจ้งพนักงาน' : ''));
+    return;
+  }
+
+  state.restaurant = res.data.restaurant;
+  state.table = res.data.table;
+  state.menu = res.data.menu;
+
+  // AC-4.3 / E15: resume an in-flight order instead of dropping back to an empty menu
+  const resumeId = directOrderId || localStorage.getItem('arin_last_order_' + state.restaurant.id + '_' + state.table.table_number);
+  if (resumeId) {
+    const orderRes = ARIN_DB.getOrder(resumeId);
+    if (orderRes.success && orderRes.data.status !== 'completed') {
+      state.order = orderRes.data;
+      renderTracking();
+      startTrackingSync(resumeId);
+      return;
+    }
+  }
+
+  renderMenu();
+}
+
+boot();
+</script>
+</body>
+</html>
