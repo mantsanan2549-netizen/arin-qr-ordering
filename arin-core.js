@@ -548,6 +548,23 @@
       // Postgres VIEW หรือ RPC function แทนการดึงทุกแถวมาคำนวณฝั่ง client
     },
 
+    // เพิ่มร้านค้าใหม่ (Super Admin) แล้วสร้างโต๊ะหมายเลข 1 ผูกให้อัตโนมัติ
+    async addRestaurant(name, ownerName, phone) {
+      const { data: restaurant, error: resError } = await sb
+        .from('restaurants')
+        .insert([{ name, owner_name: ownerName, phone }])
+        .select()
+        .single();
+      if (resError) return supabaseErr(resError);
+
+      const { error: tableError } = await sb
+        .from('restaurant_tables')
+        .insert([{ restaurant_id: restaurant.id, table_number: 1 }]);
+      if (tableError) return supabaseErr(tableError);
+
+      return envelopeOk(restaurant);
+    },
+
     // restaurantId = null หมายถึง "รวมทุกร้าน"
     async adminGetSalesSeries(restaurantId, period) {
       const buckets = buildBuckets(period);
