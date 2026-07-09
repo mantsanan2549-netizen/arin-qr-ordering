@@ -9,7 +9,6 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@300;400;500;600;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.tailwindcss.com"></script>
-<!-- Supabase JS client -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
   tailwind.config = {
@@ -39,16 +38,6 @@
 <body class="text-ink antialiased min-h-screen">
 <div id="app" class="min-h-screen"></div>
 
-<!--
-  arin-core.js runs BEFORE this script block. It calls
-  `global.supabase.createClient(url, anonKey)` internally and wraps it with
-  dedicated methods on `window.ARIN_DB` (e.g. `addRestaurant`, `addTable`) —
-  there is no raw `.from()` chaining exposed here, and no separate
-  `window.supabase`. It also exposes a `window.ARIN_REALTIME` wrapper. This
-  file never handles API keys directly — it only calls `window.ARIN_DB`'s
-  methods, and uses `window.ARIN_DB` itself as the readiness check that
-  arin-core.js finished setup.
--->
 <script src="arin-core.js"></script>
 
 <script>
@@ -127,7 +116,7 @@
       return;
     }
 
-    if (typeof window.ARIN_DB === 'undefined') {
+    if (typeof window.ARIN_DB === 'undefined' || !window.ARIN_DB) {
       renderForm('ยังไม่ได้เชื่อมต่อฐานข้อมูล (ตรวจสอบว่าโหลด arin-core.js สำเร็จหรือไม่)');
       return;
     }
@@ -141,29 +130,34 @@
     submitLabel.append(' กำลังบันทึก...');
 
     try {
-      try {
-      // 1. ส่งข้อมูลร้านค้าเข้าฐานข้อมูล ARIN ตัวจริง ผ่านโครงสร้างที่ถูกต้อง
-      const { data: restaurant, error: restaurantError } = await window.ARIN_DB
-        .from('restaurants')
-        .insert([{ name, owner_name: ownerName, phone }])
-        .select()
-        .single();
+      let restaurantData = null;
 
-      if (restaurantError) throw restaurantError;
-      if (!restaurant || !restaurant.id) throw new Error('ไม่พบ id ของร้านที่เพิ่งสร้าง');
+      // ตรวจสอบวิธีเรียกใช้ฐานข้อมูลตามโครงสร้างจริงของ window.ARIN_DB
+      if (typeof window.ARIN_DB.addRestaurant === 'function') {
+        // แผน A: เรียกใช้ผ่าน Wrapper Method สำเร็จรูปตามคอมเมนต์
+        restaurantData = await window.ARIN_DB.addRestaurant({ name, owner_name: ownerName, phone });
+        
+        if (!restaurantData || !restaurantData.id) throw new Error('ไม่พบ id ของร้านที่สร้างใหม่');
+        
+        await window.ARIN_DB.addTable({ restaurant_id: restaurantData.id, table_number: 1 });
+      } else if (typeof window.ARIN_DB.from === 'function') {
+        // แผน B: หาก window.ARIN_DB คือ Supabase Client โดยตรง
+        const { data, error } = await window.ARIN_DB.from('restaurants').insert([{ name, owner_name: ownerName, phone }]).select().single();
+        if (error) throw error;
+        restaurantData = data;
 
-      // 2. สร้างโต๊ะหมายเลข 1 ผูกกับร้านค้าให้อัตโนมัติ
-      const { error: tableError } = await window.ARIN_DB
-        .from('restaurant_tables')
-        .insert([{ restaurant_id: restaurant.id, table_number: 1 }]);
+        const { error: tableError } = await window.ARIN_DB.from('restaurant_tables').insert([{ restaurant_id: restaurantData.id, table_number: 1 }]);
+        if (tableError) throw tableError;
+      } else {
+        // ระบบแจ้งเบาะแสคำสั่งที่มีอยู่จริงใน window.ARIN_DB เพื่อให้แก้บั๊กได้ในทีเดียว
+        const availableKeys = Object.keys(window.ARIN_DB).join(', ') || 'ไม่มีฟังก์ชันข้างใน';
+        throw new Error(`โครงสร้าง ARIN_DB ไม่ตรงกับระบบ (คำสั่งที่มี: ${availableKeys})`);
+      }
 
-      if (tableError) throw tableError;
-
-      renderSuccess(restaurant);
-    } catch (error) {
-      console.error("Registration error:", error);
-      renderForm(error.message || 'เกิดข้อผิดพลาดในการบันทึกข้อมูล');
-    };
+      renderSuccess(restaurantData);
+    } catch (err) {
+      console.error("Registration error:", err);
+      renderForm(err.message || 'เกิดข้อผิดพลาดในการลงทะเบียน กรุณาลองใหม่อีกครั้ง');
     }
   }
 
