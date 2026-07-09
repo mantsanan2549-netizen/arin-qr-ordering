@@ -31,8 +31,8 @@
   // ---------------------------------------------------------------------
   // 0. SUPABASE CONFIG — ใส่ค่าของโปรเจกต์ตัวเองตรงนี้
   // ---------------------------------------------------------------------
-  const SUPABASE_URL = '';       // <-- ใส่ Supabase Project URL เช่น https://xxxxxxxx.supabase.co
-  const SUPABASE_ANON_KEY = '';  // <-- ใส่ Supabase anon/public API key
+  const SUPABASE_URL = 'https://mdekgqaipcxeopptfms.supabase.co';
+  const SUPABASE_ANON_KEY = 'sb_publishable_AgMPYdm9XKIMLd3qPt9XyQ_rX-ttYYz';
 
   // ต้องโหลด Supabase JS SDK มาก่อนไฟล์นี้ เช่น:
   // <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
