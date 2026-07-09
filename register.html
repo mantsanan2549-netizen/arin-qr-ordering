@@ -141,28 +141,29 @@
     submitLabel.append(' กำลังบันทึก...');
 
     try {
-      // 1) Create the restaurant using the core wrapper function.
-      const restaurant = await window.ARIN_DB.addRestaurant({
-        name: name,
-        owner_name: ownerName,
-        phone: phone
-      });
+      try {
+      // 1. ส่งข้อมูลร้านค้าเข้าฐานข้อมูล ARIN ตัวจริง ผ่านโครงสร้างที่ถูกต้อง
+      const { data: restaurant, error: restaurantError } = await window.ARIN_DB
+        .from('restaurants')
+        .insert([{ name, owner_name: ownerName, phone }])
+        .select()
+        .single();
 
-      if (!restaurant || !restaurant.id) {
-        throw new Error('Failed to create restaurant or retrieve its ID.');
-      }
+      if (restaurantError) throw restaurantError;
+      if (!restaurant || !restaurant.id) throw new Error('ไม่พบ id ของร้านที่เพิ่งสร้าง');
 
-      // 2) Immediately create "table 1" for this restaurant so the customer
-      //    app never renders against an empty restaurant_tables list.
-      await window.ARIN_DB.addTable({
-        restaurant_id: restaurant.id,
-        table_number: 1
-      });
+      // 2. สร้างโต๊ะหมายเลข 1 ผูกกับร้านค้าให้อัตโนมัติ
+      const { error: tableError } = await window.ARIN_DB
+        .from('restaurant_tables')
+        .insert([{ restaurant_id: restaurant.id, table_number: 1 }]);
+
+      if (tableError) throw tableError;
 
       renderSuccess(restaurant);
     } catch (error) {
-      console.error('Registration error:', error);
+      console.error("Registration error:", error);
       renderForm(error.message || 'เกิดข้อผิดพลาดในการบันทึกข้อมูล');
+    };
     }
   }
 
