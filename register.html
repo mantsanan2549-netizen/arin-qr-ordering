@@ -116,11 +116,6 @@
       return;
     }
 
-    if (typeof window.ARIN_DB === 'undefined' || !window.ARIN_DB) {
-      renderForm('ยังไม่ได้เชื่อมต่อฐานข้อมูล (ตรวจสอบว่าโหลด arin-core.js สำเร็จหรือไม่)');
-      return;
-    }
-
     submitBtn.disabled = true;
     submitBtn.classList.add('opacity-60');
     submitLabel.innerHTML = '';
@@ -130,31 +125,45 @@
     submitLabel.append(' กำลังบันทึก...');
 
     try {
-      let restaurantData = null;
+      // ดึงซอร์สโค้ดของ arin-core.js มาดักจับค่า Supabase URL และ Anon Key โดยอัตโนมัติ
+      const coreResponse = await fetch('arin-core.js');
+      const coreText = await coreResponse.text();
+      
+      const urlMatch = coreText.match(/https:\/\/[a-zA-Z0-9-]+\.supabase\.co/);
+      const keyMatch = coreText.match(/eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+/);
 
-      // ตรวจสอบวิธีเรียกใช้ฐานข้อมูลตามโครงสร้างจริงของ window.ARIN_DB
-      if (typeof window.ARIN_DB.addRestaurant === 'function') {
-        // แผน A: เรียกใช้ผ่าน Wrapper Method สำเร็จรูปตามคอมเมนต์
-        restaurantData = await window.ARIN_DB.addRestaurant({ name, owner_name: ownerName, phone });
-        
-        if (!restaurantData || !restaurantData.id) throw new Error('ไม่พบ id ของร้านที่สร้างใหม่');
-        
-        await window.ARIN_DB.addTable({ restaurant_id: restaurantData.id, table_number: 1 });
-      } else if (typeof window.ARIN_DB.from === 'function') {
-        // แผน B: หาก window.ARIN_DB คือ Supabase Client โดยตรง
-        const { data, error } = await window.ARIN_DB.from('restaurants').insert([{ name, owner_name: ownerName, phone }]).select().single();
-        if (error) throw error;
-        restaurantData = data;
-
-        const { error: tableError } = await window.ARIN_DB.from('restaurant_tables').insert([{ restaurant_id: restaurantData.id, table_number: 1 }]);
-        if (tableError) throw tableError;
-      } else {
-        // ระบบแจ้งเบาะแสคำสั่งที่มีอยู่จริงใน window.ARIN_DB เพื่อให้แก้บั๊กได้ในทีเดียว
-        const availableKeys = Object.keys(window.ARIN_DB).join(', ') || 'ไม่มีฟังก์ชันข้างใน';
-        throw new Error(`โครงสร้าง ARIN_DB ไม่ตรงกับระบบ (คำสั่งที่มี: ${availableKeys})`);
+      if (!urlMatch || !keyMatch) {
+        throw new Error('ไม่สามารถดึงข้อมูลคีย์เชื่อมต่อฐานข้อมูลจากระบบหลักได้');
       }
 
-      renderSuccess(restaurantData);
+      const supabaseUrl = urlMatch[0];
+      const supabaseAnonKey = keyMatch[0];
+
+      // สร้างการเชื่อมต่อตรงขึ้นมาใหม่เพื่อทำงานในส่วนที่ไฟล์คอร์ไม่มีฟังก์ชันรองรับ
+      if (typeof window.supabase === 'undefined' || !window.supabase.createClient) {
+        throw new Error('กรุณาตรวจสอบว่าได้โหลดสคริปต์ Supabase CDN สำเร็จแล้ว');
+      }
+      
+      const directSupabase = window.supabase.createClient(supabaseUrl, supabaseAnonKey);
+
+      // 1. ส่งข้อมูลร้านค้าเข้าฐานข้อมูลตรงๆ
+      const { data: restaurant, error: restaurantError } = await directSupabase
+        .from('restaurants')
+        .insert([{ name, owner_name: ownerName, phone }])
+        .select()
+        .single();
+
+      if (restaurantError) throw restaurantError;
+      if (!restaurant || !restaurant.id) throw new Error('ลงทะเบียนเสร็จสิ้น แต่ระบบไม่สามารถดึง ID ร้านค้ากลับมาได้');
+
+      // 2. สร้างโต๊ะหมายเลข 1 ผูกกับร้านค้าให้อัตโนมัติ
+      const { error: tableError } = await directSupabase
+        .from('restaurant_tables')
+        .insert([{ restaurant_id: restaurant.id, table_number: 1 }]);
+
+      if (tableError) throw tableError;
+
+      renderSuccess(restaurant);
     } catch (err) {
       console.error("Registration error:", err);
       renderForm(err.message || 'เกิดข้อผิดพลาดในการลงทะเบียน กรุณาลองใหม่อีกครั้ง');
