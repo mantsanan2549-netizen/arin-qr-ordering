@@ -125,39 +125,54 @@
     submitLabel.append(' กำลังบันทึก...');
 
     try {
-      // ดึงซอร์สโค้ดของ arin-core.js มาดักจับค่า Supabase URL และ Anon Key โดยอัตโนมัติ
-      const coreResponse = await fetch('arin-core.js');
-      const coreText = await coreResponse.text();
-      
-      const urlMatch = coreText.match(/https:\/\/[a-zA-Z0-9-]+\.supabase\.co/);
-      const keyMatch = coreText.match(/eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+/);
+      let dbClient = null;
 
-      if (!urlMatch || !keyMatch) {
-        throw new Error('ไม่สามารถดึงข้อมูลคีย์เชื่อมต่อฐานข้อมูลจากระบบหลักได้');
+      // ค้นหา Supabase Instance ที่แฝงอยู่ใน window.ARIN_DB จาก Property ภายใน
+      if (window.ARIN_DB) {
+        const keys = Object.getOwnPropertyNames(window.ARIN_DB).concat(Object.keys(window.ARIN_DB));
+        for (const key of keys) {
+          if (window.ARIN_DB[key] && typeof window.ARIN_DB[key].from === 'function') {
+            dbClient = window.ARIN_DB[key];
+            break;
+          }
+        }
       }
 
-      const supabaseUrl = urlMatch[0];
-      const supabaseAnonKey = keyMatch[0];
-
-      // สร้างการเชื่อมต่อตรงขึ้นมาใหม่เพื่อทำงานในส่วนที่ไฟล์คอร์ไม่มีฟังก์ชันรองรับ
-      if (typeof window.supabase === 'undefined' || !window.supabase.createClient) {
-        throw new Error('กรุณาตรวจสอบว่าได้โหลดสคริปต์ Supabase CDN สำเร็จแล้ว');
+      // หากค้นหาแบบไดนามิกไม่เจอ ให้ลองดักจับคำสั่งหน้าต่างย่อย (Fallbacks)
+      if (!dbClient && window.supabase && typeof window.supabase.from === 'function') {
+        dbClient = window.supabase;
       }
-      
-      const directSupabase = window.supabase.createClient(supabaseUrl, supabaseAnonKey);
 
-      // 1. ส่งข้อมูลร้านค้าเข้าฐานข้อมูลตรงๆ
-      const { data: restaurant, error: restaurantError } = await directSupabase
+      if (!dbClient) {
+        // หากยังหาไม่เจออีก จะใช้วิธีแกะโค้ดผ่าน Regex แบบยืดหยุ่นสูง (ดักจับทั้ง Single และ Double Quotes)
+        const coreResponse = await fetch('arin-core.js');
+        const coreText = await coreResponse.text();
+        
+        const urlMatch = coreText.match(/https:\/\/[a-zA-Z0-9-]+\.supabase\.co/);
+        const keyMatch = coreText.match(/eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+/);
+
+        if (urlMatch && keyMatch && window.supabase && window.supabase.createClient) {
+          dbClient = window.supabase.createClient(urlMatch[0], keyMatch[0]);
+        }
+      }
+
+      // ป้องกันกรณีระบบไม่มีท่อน้ำดีจริง ๆ
+      if (!dbClient || typeof dbClient.from !== 'function') {
+        throw new Error('ระบบไม่สามารถระบุตำแหน่งท่อเชื่อมต่อ Supabase Direct ได้ชั่วคราว');
+      }
+
+      // 1. ยิงลงทะเบียนร้านค้าเข้าสู่ตารางตรงๆ
+      const { data: restaurant, error: restaurantError } = await dbClient
         .from('restaurants')
         .insert([{ name, owner_name: ownerName, phone }])
         .select()
         .single();
 
       if (restaurantError) throw restaurantError;
-      if (!restaurant || !restaurant.id) throw new Error('ลงทะเบียนเสร็จสิ้น แต่ระบบไม่สามารถดึง ID ร้านค้ากลับมาได้');
+      if (!restaurant || !restaurant.id) throw new Error('ลงทะเบียนสำเร็จแต่ระบบไม่สามารถข้ามไปดึงข้อมูล ID ร้านได้');
 
-      // 2. สร้างโต๊ะหมายเลข 1 ผูกกับร้านค้าให้อัตโนมัติ
-      const { error: tableError } = await directSupabase
+      // 2. ยิงสร้างโต๊ะ 1 ให้ทันทีตามเงื่อนไข workflow
+      const { error: tableError } = await dbClient
         .from('restaurant_tables')
         .insert([{ restaurant_id: restaurant.id, table_number: 1 }]);
 
@@ -166,7 +181,7 @@
       renderSuccess(restaurant);
     } catch (err) {
       console.error("Registration error:", err);
-      renderForm(err.message || 'เกิดข้อผิดพลาดในการลงทะเบียน กรุณาลองใหม่อีกครั้ง');
+      renderForm(err.message || 'เกิดข้อผิดพลาดจากระบบฐานข้อมูล กรุณาลองใหม่อีกครั้ง');
     }
   }
 
