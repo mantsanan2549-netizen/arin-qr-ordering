@@ -41,11 +41,12 @@
 
 <!--
   arin-core.js runs BEFORE this script block. It calls
-  `global.supabase.createClient(url, anonKey)` internally and exposes the
-  resulting client's query methods directly on `window.ARIN_DB` (there is no
-  separate `window.supabase`), plus a `window.ARIN_REALTIME` wrapper. This
-  file never handles API keys directly — it only calls
-  `window.ARIN_DB.from(...)`, which also doubles as the readiness check that
+  `global.supabase.createClient(url, anonKey)` internally and wraps it with
+  dedicated methods on `window.ARIN_DB` (e.g. `addRestaurant`, `addTable`) —
+  there is no raw `.from()` chaining exposed here, and no separate
+  `window.supabase`. It also exposes a `window.ARIN_REALTIME` wrapper. This
+  file never handles API keys directly — it only calls `window.ARIN_DB`'s
+  methods, and uses `window.ARIN_DB` itself as the readiness check that
   arin-core.js finished setup.
 -->
 <script src="arin-core.js"></script>
@@ -140,28 +141,28 @@
     submitLabel.append(' กำลังบันทึก...');
 
     try {
-      // 1) Create the restaurant row.
-      const { data: restaurant, error: restaurantError } = await window.ARIN_DB
-        .from('restaurants')
-        .insert([{ name, owner_name: ownerName, phone }])
-        .select()
-        .single();
+      // 1) Create the restaurant using the core wrapper function.
+      const restaurant = await window.ARIN_DB.addRestaurant({
+        name: name,
+        owner_name: ownerName,
+        phone: phone
+      });
 
-      if (restaurantError) throw restaurantError;
-      if (!restaurant || !restaurant.id) throw new Error('ไม่พบ id ของร้านที่เพิ่งสร้าง');
+      if (!restaurant || !restaurant.id) {
+        throw new Error('Failed to create restaurant or retrieve its ID.');
+      }
 
       // 2) Immediately create "table 1" for this restaurant so the customer
       //    app never renders against an empty restaurant_tables list.
-      const { error: tableError } = await window.ARIN_DB
-        .from('restaurant_tables')
-        .insert([{ restaurant_id: restaurant.id, table_number: 1 }]);
-
-      if (tableError) throw tableError;
+      await window.ARIN_DB.addTable({
+        restaurant_id: restaurant.id,
+        table_number: 1
+      });
 
       renderSuccess(restaurant);
-    } catch (err) {
-      const message = (err && err.message) ? err.message : 'เกิดข้อผิดพลาดในการลงทะเบียน กรุณาลองใหม่อีกครั้ง';
-      renderForm(message);
+    } catch (error) {
+      console.error('Registration error:', error);
+      renderForm(error.message || 'เกิดข้อผิดพลาดในการบันทึกข้อมูล');
     }
   }
 
