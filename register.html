@@ -40,10 +40,12 @@
 <div id="app" class="min-h-screen"></div>
 
 <!--
-  arin-core.js is expected to run BEFORE this script block and expose a ready
-  Supabase client on `window.supabase` (i.e. it already called
-  supabase.createClient(url, anonKey) internally). This file never handles
-  API keys directly — it only calls `supabase.from(...)`.
+  arin-core.js runs BEFORE this script block. It calls
+  `global.supabase.createClient(url, anonKey)` internally and attaches the
+  result to `window.supabase`, plus exposes `window.ARIN_DB` and
+  `window.ARIN_REALTIME` wrapper objects. This file never handles API keys
+  directly — it only calls `window.supabase.from(...)`, and uses
+  `window.ARIN_DB` as the readiness check that arin-core.js finished setup.
 -->
 <script src="arin-core.js"></script>
 
@@ -123,7 +125,7 @@
       return;
     }
 
-    if (typeof supabase === 'undefined' || !supabase || typeof supabase.from !== 'function') {
+    if (typeof window.ARIN_DB === 'undefined') {
       renderForm('ยังไม่ได้เชื่อมต่อฐานข้อมูล (ตรวจสอบว่าโหลด arin-core.js สำเร็จหรือไม่)');
       return;
     }
@@ -138,7 +140,7 @@
 
     try {
       // 1) Create the restaurant row.
-      const { data: restaurant, error: restaurantError } = await supabase
+      const { data: restaurant, error: restaurantError } = await window.supabase
         .from('restaurants')
         .insert([{ name, owner_name: ownerName, phone }])
         .select()
@@ -149,7 +151,7 @@
 
       // 2) Immediately create "table 1" for this restaurant so the customer
       //    app never renders against an empty restaurant_tables list.
-      const { error: tableError } = await supabase
+      const { error: tableError } = await window.supabase
         .from('restaurant_tables')
         .insert([{ restaurant_id: restaurant.id, table_number: 1 }]);
 
