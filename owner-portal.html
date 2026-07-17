@@ -38,515 +38,9 @@
 <body class="text-ink antialiased min-h-screen">
 <div id="app" class="min-h-screen"></div>
 
-<script>
-/* =========================================================================
- * ARIN QR ORDERING — CORE DATA / API LAYER (v2)  [inlined for standalone use]
- * ========================================================================= */
-/**
- * ARIN QR ORDERING SYSTEM — CORE DATA / API LAYER (v2)
- * =====================================================
- * Doc refs: ARIN-API-QR-001 v1.0, ARIN-DB-QR-001 v1.0, ARIN-EDGE-QR-001 v1.0, ARIN-AC-QR-001 v1.0
- * + new scope (not in v1.0 docs — tracked here until formal spec docs exist):
- *     - merchant_users.role ('owner' | 'staff')
- *     - restaurant/menu/table self-service management (owner only)
- *     - QR code linking helper
- *     - platform-level Super Admin actor (separate from merchant_users entirely)
- *       with cross-restaurant sales analytics
- *
- * This file is a LOCAL, WORKING STAND-IN for the real backend. Every function
- * returns the same { success, data } / { success, error } envelope as the API
- * spec so UI code never branches on "mock vs real". See bottom of file for the
- * "PRODUCTION: ..." comments marking exactly what a real backend call replaces.
- */
-
-(function (global) {
-  'use strict';
-
-  // ---------------------------------------------------------------------
-  // 1. STORAGE KEYS (maps to ARIN-DB-QR-001 table names, plus new ones)
-  // ---------------------------------------------------------------------
-  const KEYS = {
-    schemaVersion: 'arin_qr_schema_version',
-    restaurants: 'arin_qr_restaurants',
-    tables: 'arin_qr_tables',
-    menuItems: 'arin_qr_menu_items',
-    merchantUsers: 'arin_qr_merchant_users',
-    orders: 'arin_qr_orders',
-    orderItems: 'arin_qr_order_items',
-    session: 'arin_qr_merchant_session',   // merchant (owner/staff) session
-    adminUsers: 'arin_qr_admin_users',     // NEW: platform-level actor, not tied to any restaurant
-    adminSession: 'arin_qr_admin_session', // NEW
-  };
-  const SCHEMA_VERSION = '2';
-
-  function read(key, fallback) {
-    try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : fallback; }
-    catch (e) { return fallback; }
-  }
-  function write(key, value) { localStorage.setItem(key, JSON.stringify(value)); }
-  function uid(prefix) { return (prefix ? prefix + '_' : '') + Math.random().toString(36).slice(2, 10); }
-  function nowIso() { return new Date().toISOString(); } // always UTC (E26) — format locally on display only
-  function envelopeOk(data) { return { success: true, data, meta: { timestamp: nowIso() } }; }
-  function envelopeErr(code, message) { return { success: false, error: { code, message }, meta: { timestamp: nowIso() } }; }
-
-  // ---------------------------------------------------------------------
-  // 2. SEED DATA
-  //    NOTE: this is a demo/prototype data layer. Bumping SCHEMA_VERSION
-  //    wipes and reseeds fresh rather than writing a real migration — fine
-  //    for a local prototype, NOT the pattern to use once there's real
-  //    restaurant data in a real database.
-  // ---------------------------------------------------------------------
-  function clearAll() { Object.values(KEYS).forEach((k) => { if (k !== KEYS.schemaVersion) localStorage.removeItem(k); }); }
-
-  function seedMenuFor(restaurantId, defs) {
-    return defs.map((m) => ({ id: uid('menu'), restaurant_id: restaurantId, image_url: '', created_at: nowIso(), updated_at: nowIso(), ...m }));
-  }
-
-  function seed() {
-    if (read(KEYS.schemaVersion, null) === SCHEMA_VERSION) return; // already on current schema
-    clearAll();
-
-    // ---- Restaurant 1 ----
-    const r1 = 'rest_001';
-    // ---- Restaurant 2 (so Super Admin has more than one restaurant to compare) ----
-    const r2 = 'rest_002';
-
-    write(KEYS.restaurants, [
-      { id: r1, name: 'ครัวคุณยาย', phone: '043-000-000', logo_url: '', is_active: true, created_at: nowIso(), updated_at: nowIso() },
-      { id: r2, name: 'ก๋วยเตี๋ยวเรือลุงมานี', phone: '043-111-111', logo_url: '', is_active: true, created_at: nowIso(), updated_at: nowIso() },
-    ]);
-
-    const tables1 = Array.from({ length: 8 }, (_, i) => ({ id: uid('table'), restaurant_id: r1, table_number: String(i + 1).padStart(2, '0'), qr_code_url: '', created_at: nowIso() }));
-    const tables2 = Array.from({ length: 6 }, (_, i) => ({ id: uid('table'), restaurant_id: r2, table_number: String(i + 1).padStart(2, '0'), qr_code_url: '', created_at: nowIso() }));
-    write(KEYS.tables, [...tables1, ...tables2]);
-
-    const menu1 = seedMenuFor(r1, [
-      { name: 'ผัดไทยกุ้งสด', description: 'เส้นจันท์ผัดซอสมะขาม กุ้งแม่น้ำตัวโต', price: 89, category: 'จานหลัก', available: true },
-      { name: 'ข้าวผัดกุ้ง', description: 'ข้าวหอมมะลิผัดกุ้งสด ไข่ดาวเยิ้ม', price: 79, category: 'จานหลัก', available: true },
-      { name: 'ต้มยำกุ้งน้ำข้น', description: 'รสจัดจ้าน เครื่องแน่น', price: 129, category: 'จานหลัก', available: true },
-      { name: 'ส้มตำไทย', description: 'เผ็ดกลาง หวานนำ', price: 59, category: 'ของทานเล่น', available: true },
-      { name: 'ปีกไก่ทอดน้ำปลา', description: 'ทอดกรอบ หมักน้ำปลาโบราณ', price: 69, category: 'ของทานเล่น', available: false },
-      { name: 'ชาไทยเย็น', description: 'ชงเข้ม หวานมัน', price: 39, category: 'เครื่องดื่ม', available: true },
-      { name: 'น้ำมะนาวโซดา', description: 'สดชื่น เปรี้ยวซ่า', price: 35, category: 'เครื่องดื่ม', available: true },
-    ]);
-    const menu2 = seedMenuFor(r2, [
-      { name: 'ก๋วยเตี๋ยวเรือหมู', description: 'น้ำตกเข้มข้น เส้นเล็ก', price: 45, category: 'จานหลัก', available: true },
-      { name: 'ก๋วยเตี๋ยวเรือเนื้อ', description: 'น้ำตกเข้มข้น เส้นใหญ่', price: 49, category: 'จานหลัก', available: true },
-      { name: 'ลูกชิ้นปลาทอด', description: 'ทอดกรอบ จิ้มซีฟู้ด', price: 39, category: 'ของทานเล่น', available: true },
-      { name: 'น้ำอัดลม', description: 'เย็นฉ่ำ', price: 20, category: 'เครื่องดื่ม', available: true },
-    ]);
-    write(KEYS.menuItems, [...menu1, ...menu2]);
-
-    write(KEYS.merchantUsers, [
-      { id: uid('merchant'), restaurant_id: r1, email: 'demo@arin.co', password: 'demo1234', role: 'owner', is_locked: false, created_at: nowIso(), last_login_at: null },
-      { id: uid('merchant'), restaurant_id: r1, email: 'staff@arin.co', password: 'staff1234', role: 'staff', is_locked: false, created_at: nowIso(), last_login_at: null },
-      { id: uid('merchant'), restaurant_id: r2, email: 'manee@arin.co', password: 'manee1234', role: 'owner', is_locked: false, created_at: nowIso(), last_login_at: null },
-    ]);
-
-    // Super Admin — platform-level, NOT scoped to any restaurant, completely separate login.
-    write(KEYS.adminUsers, [
-      { id: uid('admin'), email: 'admin@arin.co', password: 'arinadmin2026', name: 'ARIN Admin', created_at: nowIso() },
-    ]);
-
-    write(KEYS.orders, []);
-    write(KEYS.orderItems, []);
-
-    seedHistoricalOrders(r1, tables1, menu1, 60);
-    seedHistoricalOrders(r2, tables2, menu2, 60);
-
-    write(KEYS.schemaVersion, SCHEMA_VERSION);
-  }
-
-  // Backfills realistic-looking completed orders over the past N days so
-  // Super Admin charts (day/week/month/year) have something to show
-  // immediately instead of an empty graph on first load.
-  function seedHistoricalOrders(restaurantId, tables, menuItems, days) {
-    const orders = read(KEYS.orders, []);
-    const orderItems = read(KEYS.orderItems, []);
-    const availableMenu = menuItems.filter((m) => m.available !== false || true); // include all for variety
-    const today = new Date();
-
-    for (let d = days; d >= 0; d--) {
-      const day = new Date(today); day.setDate(today.getDate() - d);
-      const isWeekend = [0, 6].includes(day.getDay());
-      const isToday = d === 0;
-      const currentHour = today.getHours();
-      if (isToday && currentHour < 10) continue; // restaurant not "open" yet today — skip rather than fake future orders
-      const ordersToday = Math.floor((isWeekend ? 10 : 6) + Math.random() * (isWeekend ? 10 : 8)) * (isToday ? 0.5 : 1);
-      for (let n = 0; n < ordersToday; n++) {
-        const table = tables[Math.floor(Math.random() * tables.length)];
-        const itemCount = 1 + Math.floor(Math.random() * 3);
-        const pickedIds = new Set();
-        let total = 0;
-        const items = [];
-        for (let k = 0; k < itemCount; k++) {
-          const m = availableMenu[Math.floor(Math.random() * availableMenu.length)];
-          if (pickedIds.has(m.id)) continue;
-          pickedIds.add(m.id);
-          const qty = 1 + Math.floor(Math.random() * 3);
-          total += m.price * qty;
-          items.push({ id: uid('oi'), menu_item_id: m.id, menu_item_name: m.name, unit_price: m.price, quantity: qty, note: '' });
-        }
-        if (items.length === 0) continue;
-        const hour = isToday ? 10 + Math.floor(Math.random() * Math.max(1, currentHour - 10)) : 10 + Math.floor(Math.random() * 11); // 10:00–21:00 service window
-        const createdAt = new Date(day); createdAt.setHours(hour, Math.floor(Math.random() * 60), 0, 0);
-        const order = {
-          id: uid('ord'), restaurant_id: restaurantId, table_id: table.id, status: 'completed',
-          total, idempotency_key: uid('idem'), created_at: createdAt.toISOString(), updated_at: createdAt.toISOString(),
-        };
-        orders.push(order);
-        items.forEach((it) => orderItems.push({ ...it, order_id: order.id }));
-      }
-    }
-    write(KEYS.orders, orders);
-    write(KEYS.orderItems, orderItems);
-  }
-
-  // ---------------------------------------------------------------------
-  // 3. REALTIME LAYER — BroadcastChannel stands in for Supabase Realtime /
-  //    the WSS endpoints in API spec §6. See README for production notes.
-  // ---------------------------------------------------------------------
-  const bc = ('BroadcastChannel' in window) ? new BroadcastChannel('arin-qr-system') : null;
-  const listeners = { merchant: {}, order: {} };
-  if (bc) {
-    bc.onmessage = (ev) => {
-      const { event, restaurant_id, order_id, data } = ev.data || {};
-      if (event === 'order.created' || event === 'order.updated') {
-        (listeners.merchant[restaurant_id] || []).forEach((cb) => cb({ event, data }));
-        (listeners.order[order_id] || []).forEach((cb) => cb({ event, data }));
-      }
-    };
-  }
-  const ARIN_REALTIME = {
-    subscribeMerchant(restaurantId, cb) {
-      listeners.merchant[restaurantId] = listeners.merchant[restaurantId] || [];
-      listeners.merchant[restaurantId].push(cb);
-      return () => { listeners.merchant[restaurantId] = (listeners.merchant[restaurantId] || []).filter((f) => f !== cb); };
-    },
-    subscribeOrder(orderId, cb) {
-      listeners.order[orderId] = listeners.order[orderId] || [];
-      listeners.order[orderId].push(cb);
-      return () => { listeners.order[orderId] = (listeners.order[orderId] || []).filter((f) => f !== cb); };
-    },
-    _emit(event, payload) {
-      if (bc) bc.postMessage({ event, ...payload });
-      if (payload.restaurant_id) (listeners.merchant[payload.restaurant_id] || []).forEach((cb) => cb({ event, data: payload.data }));
-      if (payload.order_id) (listeners.order[payload.order_id] || []).forEach((cb) => cb({ event, data: payload.data }));
-    },
-  };
-
-  // ---------------------------------------------------------------------
-  // 4. DATE BUCKETING HELPERS (for Super Admin analytics — day/week/month/year)
-  // ---------------------------------------------------------------------
-  const THAI_MONTHS = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
-  function startOfDay(d) { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; }
-  function startOfWeek(d) { const x = startOfDay(d); const day = (x.getDay() + 6) % 7; x.setDate(x.getDate() - day); return x; } // Monday start
-  function startOfMonth(d) { return new Date(d.getFullYear(), d.getMonth(), 1); }
-  function startOfYear(d) { return new Date(d.getFullYear(), 0, 1); }
-  function stepDate(d, period, delta) {
-    const x = new Date(d);
-    if (period === 'day') x.setDate(x.getDate() + delta);
-    else if (period === 'week') x.setDate(x.getDate() + delta * 7);
-    else if (period === 'month') x.setMonth(x.getMonth() + delta);
-    else if (period === 'year') x.setFullYear(x.getFullYear() + delta);
-    return x;
-  }
-  function bucketConfig(period) {
-    const table = {
-      day: { count: 14, startFn: startOfDay, label: (d) => `${d.getDate()}/${d.getMonth() + 1}` },
-      week: { count: 10, startFn: startOfWeek, label: (d) => `${d.getDate()}/${d.getMonth() + 1}` },
-      month: { count: 12, startFn: startOfMonth, label: (d) => `${THAI_MONTHS[d.getMonth()]} ${d.getFullYear()}` },
-      year: { count: 5, startFn: startOfYear, label: (d) => `${d.getFullYear()}` },
-    };
-    return table[period] || table.day;
-  }
-  function buildBuckets(period) {
-    const cfg = bucketConfig(period);
-    const now = new Date();
-    const currentStart = cfg.startFn(now);
-    const starts = [];
-    for (let i = cfg.count - 1; i >= 0; i--) starts.push(stepDate(currentStart, period, -i));
-    return starts.map((start, i) => ({
-      start,
-      end: i + 1 < starts.length ? starts[i + 1] : stepDate(start, period, 1),
-      label: cfg.label(start),
-    }));
-  }
-
-  // ---------------------------------------------------------------------
-  // 5. API FUNCTIONS
-  // ---------------------------------------------------------------------
-  const STATUS_ORDER = ['pending', 'accepted', 'preparing', 'ready', 'completed'];
-
-  function hydrateOrder(order) {
-    const items = read(KEYS.orderItems, []).filter((i) => i.order_id === order.id);
-    return { ...order, order_id: order.id, items };
-  }
-
-  const ARIN_DB = {
-    // ---- Customer-facing (unchanged from v1) ----
-    getRestaurantMenu(restaurantId, tableNumber) {
-      const restaurant = read(KEYS.restaurants, []).find((r) => r.id === restaurantId);
-      if (!restaurant) return envelopeErr('RESTAURANT_NOT_FOUND', 'ไม่พบร้านนี้ในระบบ');
-      if (!restaurant.is_active) return envelopeErr('RESTAURANT_INACTIVE', 'ร้านปิดรับออเดอร์ชั่วคราว');
-      const table = read(KEYS.tables, []).find((t) => t.restaurant_id === restaurantId && t.table_number === tableNumber);
-      if (!table) return envelopeErr('TABLE_NOT_FOUND', 'ไม่พบโต๊ะนี้ กรุณาแจ้งพนักงาน');
-      const menu = read(KEYS.menuItems, []).filter((m) => m.restaurant_id === restaurantId);
-      return envelopeOk({ restaurant: { id: restaurant.id, name: restaurant.name, logo: restaurant.logo_url }, table: { id: table.id, table_number: table.table_number }, menu });
-    },
-
-    createOrder({ restaurant_id, table_id, items, idempotency_key }) {
-      const restaurant = read(KEYS.restaurants, []).find((r) => r.id === restaurant_id);
-      if (!restaurant || !restaurant.is_active) return envelopeErr('RESTAURANT_INACTIVE', 'ร้านปิดรับออเดอร์');
-      const table = read(KEYS.tables, []).find((t) => t.id === table_id);
-      if (!table) return envelopeErr('TABLE_NOT_FOUND', 'table_id ไม่ถูกต้อง');
-      if (!items || items.length === 0) return envelopeErr('EMPTY_ORDER', 'ตะกร้าว่าง');
-
-      const orders = read(KEYS.orders, []);
-      const dupe = orders.find((o) => o.idempotency_key === idempotency_key);
-      if (dupe) return envelopeOk(hydrateOrder(dupe));
-
-      const menuItems = read(KEYS.menuItems, []);
-      let total = 0;
-      const resolvedItems = [];
-      for (const it of items) {
-        if (!Number.isInteger(it.quantity) || it.quantity <= 0) return envelopeErr('INVALID_QUANTITY', 'จำนวนต้องมากกว่า 0');
-        const menuItem = menuItems.find((m) => m.id === it.menu_id);
-        if (!menuItem || !menuItem.available) return envelopeErr('MENU_ITEM_UNAVAILABLE', `"${menuItem ? menuItem.name : it.menu_id}" เพิ่งหมด`);
-        total += menuItem.price * it.quantity;
-        resolvedItems.push({ id: uid('oi'), menu_item_id: menuItem.id, menu_item_name: menuItem.name, unit_price: menuItem.price, quantity: it.quantity, note: (it.note || '').slice(0, 200) });
-      }
-
-      const order = { id: uid('ord'), restaurant_id, table_id, status: 'pending', total, idempotency_key: idempotency_key || uid('idem'), created_at: nowIso(), updated_at: nowIso() };
-      write(KEYS.orders, [...orders, order]);
-      write(KEYS.orderItems, [...read(KEYS.orderItems, []), ...resolvedItems.map((it) => ({ ...it, order_id: order.id }))]);
-
-      ARIN_REALTIME._emit('order.created', { restaurant_id, data: { order_id: order.id, table_number: table.table_number, total: order.total } });
-      return envelopeOk(hydrateOrder(order));
-    },
-
-    getOrder(orderId) {
-      const order = read(KEYS.orders, []).find((o) => o.id === orderId);
-      if (!order) return envelopeErr('ORDER_NOT_FOUND', 'ไม่พบออเดอร์นี้');
-      return envelopeOk(hydrateOrder(order));
-    },
-
-    // ---- Merchant auth (now returns role) ----
-    merchantLogin(email, password) {
-      const user = read(KEYS.merchantUsers, []).find((u) => u.email === email);
-      if (!user || user.password !== password) return envelopeErr('INVALID_CREDENTIALS', 'อีเมลหรือรหัสผ่านไม่ถูกต้อง');
-      if (user.is_locked) return envelopeErr('ACCOUNT_LOCKED', 'บัญชีถูกล็อก');
-      user.last_login_at = nowIso();
-      write(KEYS.merchantUsers, read(KEYS.merchantUsers, []).map((u) => (u.id === user.id ? user : u)));
-      const session = { access_token: uid('access'), refresh_token: uid('refresh'), restaurant_id: user.restaurant_id, email: user.email, role: user.role || 'staff', issued_at: Date.now(), expires_in: 3600 };
-      write(KEYS.session, session);
-      return envelopeOk({ ...session });
-    },
-    refreshToken(refresh_token) {
-      const session = read(KEYS.session, null);
-      if (!session || session.refresh_token !== refresh_token) return envelopeErr('REFRESH_TOKEN_EXPIRED', 'กรุณาเข้าสู่ระบบใหม่');
-      session.access_token = uid('access'); session.issued_at = Date.now();
-      write(KEYS.session, session);
-      return envelopeOk({ access_token: session.access_token, expires_in: 3600 });
-    },
-    logout() { localStorage.removeItem(KEYS.session); },
-    getSession() { return read(KEYS.session, null); },
-
-    // ---- Merchant order console (staff + owner) ----
-    listMerchantOrders(restaurantId) {
-      const active = STATUS_ORDER.filter((s) => s !== 'completed');
-      const orders = read(KEYS.orders, []).filter((o) => o.restaurant_id === restaurantId && active.includes(o.status)).sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-      const tables = read(KEYS.tables, []);
-      const orderItems = read(KEYS.orderItems, []);
-      return envelopeOk({ orders: orders.map((o) => ({ order_id: o.id, table_number: (tables.find((t) => t.id === o.table_id) || {}).table_number || '?', status: o.status, total: o.total, item_count: orderItems.filter((i) => i.order_id === o.id).reduce((n, i) => n + i.quantity, 0), created_at: o.created_at })) });
-    },
-    getMerchantOrderDetail(orderId, restaurantId) {
-      const order = read(KEYS.orders, []).find((o) => o.id === orderId);
-      if (!order) return envelopeErr('ORDER_NOT_FOUND', 'ไม่พบออเดอร์');
-      if (order.restaurant_id !== restaurantId) return envelopeErr('FORBIDDEN', 'ออเดอร์นี้ไม่ใช่ของร้านนี้');
-      return envelopeOk(hydrateOrder(order));
-    },
-    updateOrderStatus(orderId, restaurantId, newStatus) {
-      const orders = read(KEYS.orders, []);
-      const order = orders.find((o) => o.id === orderId);
-      if (!order) return envelopeErr('ORDER_NOT_FOUND', 'ไม่พบออเดอร์');
-      if (order.restaurant_id !== restaurantId) return envelopeErr('FORBIDDEN', 'ไม่มีสิทธิ์แก้ไขออเดอร์นี้');
-      const currentIdx = STATUS_ORDER.indexOf(order.status);
-      const nextIdx = STATUS_ORDER.indexOf(newStatus);
-      if (nextIdx !== currentIdx + 1) return envelopeErr('INVALID_STATUS_TRANSITION', 'ไม่สามารถข้ามสถานะได้');
-      order.status = newStatus; order.updated_at = nowIso();
-      write(KEYS.orders, orders.map((o) => (o.id === order.id ? order : o)));
-      ARIN_REALTIME._emit('order.updated', { restaurant_id: restaurantId, order_id: order.id, data: { order_id: order.id, status: newStatus } });
-      return envelopeOk(hydrateOrder(order));
-    },
-
-    // =====================================================================
-    // NEW — OWNER-ONLY RESTAURANT SELF-SERVICE MANAGEMENT
-    // Every function below double-checks restaurant_id ownership, mirroring
-    // AC-6.3's FORBIDDEN pattern, so a staff/owner token from one restaurant
-    // can never read or edit another restaurant's data.
-    // =====================================================================
-    updateRestaurantProfile(restaurantId, patch) {
-      const restaurants = read(KEYS.restaurants, []);
-      const restaurant = restaurants.find((r) => r.id === restaurantId);
-      if (!restaurant) return envelopeErr('RESTAURANT_NOT_FOUND', 'ไม่พบร้าน');
-      const updated = { ...restaurant, ...patch, updated_at: nowIso() };
-      write(KEYS.restaurants, restaurants.map((r) => (r.id === restaurantId ? updated : r)));
-      return envelopeOk(updated);
-    },
-
-    listMenuItemsForOwner(restaurantId) {
-      return envelopeOk({ menu: read(KEYS.menuItems, []).filter((m) => m.restaurant_id === restaurantId).sort((a, b) => (a.category || '').localeCompare(b.category || '')) });
-    },
-    createMenuItem(restaurantId, item) {
-      if (!item.name || item.name.trim() === '') return envelopeErr('VALIDATION_ERROR', 'กรุณาใส่ชื่อเมนู');
-      if (typeof item.price !== 'number' || item.price < 0) return envelopeErr('VALIDATION_ERROR', 'ราคาต้องไม่ติดลบ');
-      const menuItems = read(KEYS.menuItems, []);
-      const newItem = { id: uid('menu'), restaurant_id: restaurantId, name: item.name.trim(), description: item.description || '', price: item.price, category: item.category || 'เมนู', image_url: item.image_url || '', available: item.available !== false, created_at: nowIso(), updated_at: nowIso() };
-      write(KEYS.menuItems, [...menuItems, newItem]);
-      return envelopeOk(newItem);
-    },
-    updateMenuItem(menuItemId, restaurantId, patch) {
-      const menuItems = read(KEYS.menuItems, []);
-      const item = menuItems.find((m) => m.id === menuItemId);
-      if (!item) return envelopeErr('MENU_ITEM_NOT_FOUND', 'ไม่พบเมนูนี้');
-      if (item.restaurant_id !== restaurantId) return envelopeErr('FORBIDDEN', 'ไม่มีสิทธิ์แก้ไขเมนูนี้');
-      if (patch.price !== undefined && (typeof patch.price !== 'number' || patch.price < 0)) return envelopeErr('VALIDATION_ERROR', 'ราคาต้องไม่ติดลบ');
-      const updated = { ...item, ...patch, updated_at: nowIso() };
-      write(KEYS.menuItems, menuItems.map((m) => (m.id === menuItemId ? updated : m)));
-      return envelopeOk(updated);
-    },
-    deleteMenuItem(menuItemId, restaurantId) {
-      const menuItems = read(KEYS.menuItems, []);
-      const item = menuItems.find((m) => m.id === menuItemId);
-      if (!item) return envelopeErr('MENU_ITEM_NOT_FOUND', 'ไม่พบเมนูนี้');
-      if (item.restaurant_id !== restaurantId) return envelopeErr('FORBIDDEN', 'ไม่มีสิทธิ์ลบเมนูนี้');
-      // Mirrors DB spec §7: order_items.menu_item_id is ON DELETE RESTRICT —
-      // a menu item referenced by any historical order can't be hard-deleted.
-      const referenced = read(KEYS.orderItems, []).some((oi) => oi.menu_item_id === menuItemId);
-      if (referenced) return envelopeErr('MENU_ITEM_IN_USE', 'เมนูนี้เคยถูกสั่งแล้ว ลบไม่ได้ — ปิดการขายแทนได้');
-      write(KEYS.menuItems, menuItems.filter((m) => m.id !== menuItemId));
-      return envelopeOk({ deleted: true });
-    },
-
-    listTables(restaurantId) {
-      return envelopeOk({ tables: read(KEYS.tables, []).filter((t) => t.restaurant_id === restaurantId).sort((a, b) => a.table_number.localeCompare(b.table_number, 'th', { numeric: true })) });
-    },
-    createTable(restaurantId, tableNumber) {
-      const num = String(tableNumber).trim();
-      if (!num) return envelopeErr('VALIDATION_ERROR', 'กรุณาใส่หมายเลขโต๊ะ');
-      const tables = read(KEYS.tables, []);
-      // Mirrors DB spec §3: UNIQUE (restaurant_id, table_number)
-      if (tables.some((t) => t.restaurant_id === restaurantId && t.table_number === num)) return envelopeErr('TABLE_NUMBER_TAKEN', `โต๊ะ ${num} มีอยู่แล้ว`);
-      const table = { id: uid('table'), restaurant_id: restaurantId, table_number: num, qr_code_url: '', created_at: nowIso() };
-      write(KEYS.tables, [...tables, table]);
-      return envelopeOk(table);
-    },
-    deleteTable(tableId, restaurantId) {
-      const tables = read(KEYS.tables, []);
-      const table = tables.find((t) => t.id === tableId);
-      if (!table) return envelopeErr('TABLE_NOT_FOUND', 'ไม่พบโต๊ะนี้');
-      if (table.restaurant_id !== restaurantId) return envelopeErr('FORBIDDEN', 'ไม่มีสิทธิ์ลบโต๊ะนี้');
-      const hasActiveOrder = read(KEYS.orders, []).some((o) => o.table_id === tableId && o.status !== 'completed');
-      if (hasActiveOrder) return envelopeErr('TABLE_HAS_ACTIVE_ORDER', 'โต๊ะนี้มีออเดอร์ค้างอยู่ ลบไม่ได้ตอนนี้');
-      write(KEYS.tables, tables.filter((t) => t.id !== tableId));
-      return envelopeOk({ deleted: true });
-    },
-    // Builds the URL a printed QR code should point to. `baseUrl` lets the
-    // owner point it at wherever customer-app.html is actually hosted.
-    buildCustomerLink(baseUrl, restaurantId, tableNumber) {
-      const base = (baseUrl || 'customer-app.html').replace(/\/$/, '');
-      return `${base}?restaurant_id=${encodeURIComponent(restaurantId)}&table=${encodeURIComponent(tableNumber)}`;
-    },
-
-    // =====================================================================
-    // NEW — SUPER ADMIN (platform level, separate auth from merchant_users)
-    // =====================================================================
-    adminLogin(email, password) {
-      const admin = read(KEYS.adminUsers, []).find((a) => a.email === email);
-      if (!admin || admin.password !== password) return envelopeErr('INVALID_CREDENTIALS', 'อีเมลหรือรหัสผ่านไม่ถูกต้อง');
-      const session = { access_token: uid('admin_access'), name: admin.name, email: admin.email, issued_at: Date.now() };
-      write(KEYS.adminSession, session);
-      return envelopeOk(session);
-    },
-    adminLogout() { localStorage.removeItem(KEYS.adminSession); },
-    getAdminSession() { return read(KEYS.adminSession, null); },
-
-    adminListRestaurants() {
-      const restaurants = read(KEYS.restaurants, []);
-      const orders = read(KEYS.orders, []);
-      const todayStart = startOfDay(new Date());
-      return envelopeOk({
-        restaurants: restaurants.map((r) => {
-          const rOrders = orders.filter((o) => o.restaurant_id === r.id);
-          const todayOrders = rOrders.filter((o) => new Date(o.created_at) >= todayStart);
-          return {
-            id: r.id, name: r.name, is_active: r.is_active,
-            total_orders: rOrders.length,
-            total_revenue: rOrders.reduce((s, o) => s + o.total, 0),
-            today_orders: todayOrders.length,
-            today_revenue: todayOrders.reduce((s, o) => s + o.total, 0),
-          };
-        }),
-      });
-    },
-
-    // restaurantId = null means "all restaurants combined"
-    adminGetSalesSeries(restaurantId, period) {
-      const buckets = buildBuckets(period);
-      const orders = read(KEYS.orders, []).filter((o) => !restaurantId || o.restaurant_id === restaurantId);
-      const series = buckets.map((b) => {
-        const inBucket = orders.filter((o) => { const t = new Date(o.created_at); return t >= b.start && t < b.end; });
-        return { label: b.label, revenue: inBucket.reduce((s, o) => s + o.total, 0), orders: inBucket.length };
-      });
-      return envelopeOk({ period, series });
-    },
-
-    adminGetMenuBreakdown(restaurantId, period) {
-      const buckets = buildBuckets(period);
-      const rangeStart = buckets[0].start;
-      const orders = read(KEYS.orders, []).filter((o) => (!restaurantId || o.restaurant_id === restaurantId) && new Date(o.created_at) >= rangeStart);
-      const orderIds = new Set(orders.map((o) => o.id));
-      const items = read(KEYS.orderItems, []).filter((oi) => orderIds.has(oi.order_id));
-      const byName = {};
-      items.forEach((it) => {
-        byName[it.menu_item_name] = byName[it.menu_item_name] || { name: it.menu_item_name, quantity: 0, revenue: 0 };
-        byName[it.menu_item_name].quantity += it.quantity;
-        byName[it.menu_item_name].revenue += it.quantity * it.unit_price;
-      });
-      const breakdown = Object.values(byName).sort((a, b) => b.revenue - a.revenue);
-      return envelopeOk({ period, breakdown });
-    },
-  };
-
-  // ---------------------------------------------------------------------
-  // 6. EXPORT
-  // ---------------------------------------------------------------------
-  seed();
-  global.ARIN_DB = ARIN_DB;
-  global.ARIN_REALTIME = ARIN_REALTIME;
-  global.ARIN_UTIL = { uid, nowIso, STATUS_ORDER };
-})(window);
-
-/*
- * PRODUCTION MAPPING (what to replace when wiring to a real backend):
- * ----------------------------------------------------------------------
- * ARIN_DB.updateRestaurantProfile   -> PATCH /merchant/restaurant                (new endpoint, owner-only)
- * ARIN_DB.listMenuItemsForOwner     -> GET   /merchant/menu                      (new endpoint, owner-only)
- * ARIN_DB.createMenuItem            -> POST  /merchant/menu
- * ARIN_DB.updateMenuItem            -> PATCH /merchant/menu/{menu_id}
- * ARIN_DB.deleteMenuItem            -> DELETE /merchant/menu/{menu_id}
- * ARIN_DB.listTables/createTable/deleteTable -> /merchant/tables endpoints (new)
- * ARIN_DB.adminLogin                -> POST  /admin/auth/login                   (fully separate auth realm from merchant JWTs)
- * ARIN_DB.adminListRestaurants      -> GET   /admin/restaurants
- * ARIN_DB.adminGetSalesSeries       -> GET   /admin/analytics/sales?restaurant_id=&period=
- * ARIN_DB.adminGetMenuBreakdown     -> GET   /admin/analytics/menu-breakdown?restaurant_id=&period=
- * All of the above are NEW endpoints — none exist yet in ARIN-API-QR-001 v1.0.
- * merchant_users.role should be added as a NOT NULL column, default 'staff',
- * CHECK (role IN ('owner','staff')) in ARIN-DB-QR-001 §5.
- */
-
-</script>
+<!-- arin-core.js เชื่อมต่อ Supabase จริง ต้องโหลด SDK นี้มาก่อนเสมอ -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="arin-core.js"></script>
 
 <script>
 /* =========================================================================
@@ -598,10 +92,10 @@ function renderLogin(errorMsg) {
         <p class="text-white/30 text-xs">(ร้านที่สอง: manee@arin.co / manee1234)</p>
       </div>
     </div>`;
-  document.getElementById('login-btn').addEventListener('click', () => {
+  document.getElementById('login-btn').addEventListener('click', async () => {
     const email = document.getElementById('login-email').value.trim();
     const password = document.getElementById('login-password').value;
-    const res = ARIN_DB.merchantLogin(email, password);
+    const res = await ARIN_DB.merchantLogin(email, password);
     if (!res.success) { renderLogin(res.error.message); return; }
     if (res.data.role !== 'owner') { ARIN_DB.logout(); renderLogin('บัญชีนี้เป็นพนักงาน ไม่มีสิทธิ์เข้า Owner Portal — ใช้หน้ารับออเดอร์แทน'); return; }
     state.session = ARIN_DB.getSession();
@@ -624,8 +118,8 @@ let refreshTimer = null;
 function scheduleTokenRefresh() {
   clearTimeout(refreshTimer);
   const refreshInMs = (state.session.expires_in - 300) * 1000;
-  refreshTimer = setTimeout(() => {
-    const res = ARIN_DB.refreshToken(state.session.refresh_token);
+  refreshTimer = setTimeout(async () => {
+    const res = await ARIN_DB.refreshToken(state.session.refresh_token);
     if (res.success) { state.session = ARIN_DB.getSession(); scheduleTokenRefresh(); }
     else renderLogin('เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่');
   }, Math.max(refreshInMs, 5000));
@@ -634,8 +128,8 @@ function scheduleTokenRefresh() {
 /* -------------------------------------------------------------------------
  * SHELL — header + tab bar, shared by every tab
  * ---------------------------------------------------------------------- */
-function renderShell() {
-  const restaurant = ARIN_DB.updateRestaurantProfile(state.session.restaurant_id, {}).data; // read-only fetch via no-op patch
+async function renderShell() {
+  const restaurant = (await ARIN_DB.updateRestaurantProfile(state.session.restaurant_id, {})).data; // read-only fetch via no-op patch
   const tabs = [
     { id: 'orders', label: 'ออเดอร์สด' },
     { id: 'sales', label: 'ยอดขาย' },
@@ -676,8 +170,8 @@ function renderShell() {
  * TAB: Live Orders (same behavior as the staff dashboard, so an owner
  * never has to juggle two logins to keep an eye on the floor)
  * ---------------------------------------------------------------------- */
-function renderOrdersTab(root) {
-  const orders = ARIN_DB.listMerchantOrders(state.session.restaurant_id).data.orders;
+async function renderOrdersTab(root) {
+  const orders = (await ARIN_DB.listMerchantOrders(state.session.restaurant_id)).data.orders;
   root.innerHTML = `
     <div class="flex items-center justify-between mb-4">
       <h2 class="font-display font-semibold text-navy-900">ออเดอร์ที่ต้องดำเนินการ (${orders.length})</h2>
@@ -693,8 +187,8 @@ function renderOrdersTab(root) {
           ${NEXT_STATUS[o.status] ? `<button data-advance="${o.order_id}" data-current="${o.status}" class="advance-btn w-full py-2.5 rounded-xl bg-navy-900 text-white text-sm font-medium">${NEXT_LABEL[o.status]} →</button>` : ''}
         </div>`).join('')}
     </div>`;
-  root.querySelectorAll('.advance-btn').forEach(b => b.addEventListener('click', () => {
-    const res = ARIN_DB.updateOrderStatus(b.dataset.advance, state.session.restaurant_id, NEXT_STATUS[b.dataset.current]);
+  root.querySelectorAll('.advance-btn').forEach(b => b.addEventListener('click', async () => {
+    const res = await ARIN_DB.updateOrderStatus(b.dataset.advance, state.session.restaurant_id, NEXT_STATUS[b.dataset.current]);
     if (!res.success) { alert(res.error.message); return; }
     renderOrdersTab(root);
   }));
@@ -704,9 +198,9 @@ function renderOrdersTab(root) {
  * TAB: Sales & Analytics — day/week/month/year revenue chart + top menu
  * items by revenue, scoped to this restaurant only.
  * ---------------------------------------------------------------------- */
-function renderSalesTab(root) {
-  const seriesRes = ARIN_DB.adminGetSalesSeries(state.session.restaurant_id, state.salesPeriod);
-  const breakdownRes = ARIN_DB.adminGetMenuBreakdown(state.session.restaurant_id, state.salesPeriod);
+async function renderSalesTab(root) {
+  const seriesRes = await ARIN_DB.adminGetSalesSeries(state.session.restaurant_id, state.salesPeriod);
+  const breakdownRes = await ARIN_DB.adminGetMenuBreakdown(state.session.restaurant_id, state.salesPeriod);
   const series = seriesRes.data.series;
   const totalRevenue = series.reduce((s, p) => s + p.revenue, 0);
   const totalOrders = series.reduce((s, p) => s + p.orders, 0);
@@ -765,8 +259,8 @@ function renderSalesTab(root) {
 /* -------------------------------------------------------------------------
  * TAB: Menu Management — add / edit / toggle-availability / delete
  * ---------------------------------------------------------------------- */
-function renderMenuTab(root) {
-  const menu = ARIN_DB.listMenuItemsForOwner(state.session.restaurant_id).data.menu;
+async function renderMenuTab(root) {
+  const menu = (await ARIN_DB.listMenuItemsForOwner(state.session.restaurant_id)).data.menu;
   root.innerHTML = `
     <div class="flex items-center justify-between mb-4">
       <h2 class="font-display font-semibold text-navy-900">จัดการเมนู (${menu.length})</h2>
@@ -802,17 +296,17 @@ function renderMenuRow(m) {
 }
 
 function bindMenuRowEvents() {
-  document.querySelectorAll('[data-toggle]').forEach(el => el.addEventListener('change', () => {
-    ARIN_DB.updateMenuItem(el.dataset.toggle, state.session.restaurant_id, { available: el.checked });
+  document.querySelectorAll('[data-toggle]').forEach(el => el.addEventListener('change', async () => {
+    await ARIN_DB.updateMenuItem(el.dataset.toggle, state.session.restaurant_id, { available: el.checked });
     renderMenuTab(document.getElementById('tab-content'));
   }));
-  document.querySelectorAll('[data-edit]').forEach(el => el.addEventListener('click', () => {
-    const item = ARIN_DB.listMenuItemsForOwner(state.session.restaurant_id).data.menu.find(m => m.id === el.dataset.edit);
+  document.querySelectorAll('[data-edit]').forEach(el => el.addEventListener('click', async () => {
+    const item = (await ARIN_DB.listMenuItemsForOwner(state.session.restaurant_id)).data.menu.find(m => m.id === el.dataset.edit);
     showMenuForm(item);
   }));
-  document.querySelectorAll('[data-delete]').forEach(el => el.addEventListener('click', () => {
+  document.querySelectorAll('[data-delete]').forEach(el => el.addEventListener('click', async () => {
     if (!confirm('ยืนยันลบเมนูนี้?')) return;
-    const res = ARIN_DB.deleteMenuItem(el.dataset.delete, state.session.restaurant_id);
+    const res = await ARIN_DB.deleteMenuItem(el.dataset.delete, state.session.restaurant_id);
     if (!res.success) { alert(res.error.message); return; } // e.g. MENU_ITEM_IN_USE
     renderMenuTab(document.getElementById('tab-content'));
   }));
@@ -838,7 +332,7 @@ function showMenuForm(item) {
       <p id="mf-error" class="text-flamingo-500 text-xs mt-2 hidden"></p>
     </div>`;
   document.getElementById('mf-cancel').addEventListener('click', () => { slot.innerHTML = ''; });
-  document.getElementById('mf-save').addEventListener('click', () => {
+  document.getElementById('mf-save').addEventListener('click', async () => {
     const payload = {
       name: document.getElementById('mf-name').value,
       category: document.getElementById('mf-category').value || 'เมนู',
@@ -846,7 +340,7 @@ function showMenuForm(item) {
       image_url: document.getElementById('mf-image').value,
       description: document.getElementById('mf-description').value,
     };
-    const res = isEdit ? ARIN_DB.updateMenuItem(item.id, state.session.restaurant_id, payload) : ARIN_DB.createMenuItem(state.session.restaurant_id, payload);
+    const res = isEdit ? await ARIN_DB.updateMenuItem(item.id, state.session.restaurant_id, payload) : await ARIN_DB.createMenuItem(state.session.restaurant_id, payload);
     if (!res.success) {
       const err = document.getElementById('mf-error');
       err.textContent = res.error.message; err.classList.remove('hidden');
@@ -892,8 +386,8 @@ function renderSettingsTab(root, restaurant) {
         <p id="st-saved" class="text-emerald-600 text-xs text-center hidden">บันทึกแล้ว</p>
       </div>
     </div>`;
-  document.getElementById('st-save').addEventListener('click', () => {
-    ARIN_DB.updateRestaurantProfile(state.session.restaurant_id, {
+  document.getElementById('st-save').addEventListener('click', async () => {
+    await ARIN_DB.updateRestaurantProfile(state.session.restaurant_id, {
       name: document.getElementById('st-name').value.trim() || restaurant.name,
       phone: document.getElementById('st-phone').value.trim(),
       logo_url: document.getElementById('st-logo').value.trim(),
@@ -909,8 +403,8 @@ function renderSettingsTab(root, restaurant) {
  * TAB: Tables & QR — add/remove tables, generate a QR per table that
  * encodes the exact link customer-app.html expects (?restaurant_id=&table=)
  * ---------------------------------------------------------------------- */
-function renderTablesTab(root) {
-  const tables = ARIN_DB.listTables(state.session.restaurant_id).data.tables;
+async function renderTablesTab(root) {
+  const tables = (await ARIN_DB.listTables(state.session.restaurant_id)).data.tables;
   root.innerHTML = `
     <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
       <h2 class="font-display font-semibold text-navy-900">โต๊ะ & QR Code (${tables.length})</h2>
@@ -948,17 +442,17 @@ function renderTablesTab(root) {
     renderTablesTab(root);
   });
 
-  document.getElementById('add-table-btn').addEventListener('click', () => {
+  document.getElementById('add-table-btn').addEventListener('click', async () => {
     const num = document.getElementById('new-table-number').value;
-    const res = ARIN_DB.createTable(state.session.restaurant_id, num);
+    const res = await ARIN_DB.createTable(state.session.restaurant_id, num);
     const errEl = document.getElementById('table-error');
     if (!res.success) { errEl.textContent = res.error.message; errEl.classList.remove('hidden'); return; }
     renderTablesTab(root);
   });
 
-  document.querySelectorAll('[data-delete-table]').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('[data-delete-table]').forEach(b => b.addEventListener('click', async () => {
     if (!confirm('ยืนยันลบโต๊ะนี้?')) return;
-    const res = ARIN_DB.deleteTable(b.dataset.deleteTable, state.session.restaurant_id);
+    const res = await ARIN_DB.deleteTable(b.dataset.deleteTable, state.session.restaurant_id);
     if (!res.success) { alert(res.error.message); return; } // e.g. TABLE_HAS_ACTIVE_ORDER
     renderTablesTab(root);
   }));
@@ -981,7 +475,7 @@ function renderTablesTab(root) {
 /* -------------------------------------------------------------------------
  * BOOT
  * ---------------------------------------------------------------------- */
-function boot() {
+async function boot() {
   if (!state.session) { renderLogin(); return; }
   if (state.session.role !== 'owner') { renderForbidden(); return; }
   scheduleTokenRefresh();

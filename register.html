@@ -37,6 +37,8 @@
 <body class="text-ink antialiased min-h-screen">
 <div id="app" class="min-h-screen"></div>
 
+<!-- arin-core.js เชื่อมต่อ Supabase จริง จึงต้องโหลด SDK นี้มาก่อนเสมอ มิฉะนั้น window.ARIN_DB จะไม่ถูกสร้าง -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="arin-core.js"></script>
 
 <script>
@@ -130,9 +132,15 @@
       }
 
       // เรียกใช้งานฟังก์ชันลงทะเบียนโดยตรงผ่านระบบแกนหลัก
-      const restaurant = await window.ARIN_DB.addRestaurant(name, ownerName, phone);
-      
-      renderSuccess(restaurant);
+      // หมายเหตุ: ฟังก์ชันใน ARIN_DB ทุกตัวคืนค่าเป็น envelope { success, data } / { success, error }
+      // ไม่ throw เอง จึงต้อง unwrap ตรงนี้แทน
+      const result = await window.ARIN_DB.addRestaurant(name, ownerName, phone);
+
+      if (!result.success) {
+        throw new Error(result.error?.message || 'เกิดข้อผิดพลาดในการลงทะเบียน');
+      }
+
+      renderSuccess(result.data);
     } catch (err) {
       console.error("Registration error:", err);
       renderForm(err.message || 'เกิดข้อผิดพลาดในการลงทะเบียน กรุณาลองใหม่อีกครั้ง');
